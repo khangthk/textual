@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.83.0] - 2024-10-10
+
+### Added
+
+- Added support for A-F to Digits widget https://github.com/Textualize/textual/pull/5094
+- Added `Region.constrain` https://github.com/Textualize/textual/pull/5097
+
+### Changed
+
+- `Screen.ALLOW_IN_MAXIMIZED_VIEW` will now default to `App.ALLOW_IN_MAXIMIZED_VIEW` https://github.com/Textualize/textual/pull/5088
+- Widgets matching `.-textual-system` will now be included in the maximize view by default https://github.com/Textualize/textual/pull/5088
+- Digits are now thin by default, style with text-style: bold to get bold digits https://github.com/Textualize/textual/pull/5094
+- Made `Widget.absolute_offset` public https://github.com/Textualize/textual/pull/5097
+- Tooltips are now displayed directly below the mouse cursor https://github.com/Textualize/textual/pull/5097
+- `Region.inflect` will now assume that margins overlap https://github.com/Textualize/textual/pull/5097
+- `Pilot.click` and friends will now accept a widget, in addition to a selector https://github.com/Textualize/textual/pull/5095
+
 ## [0.82.0] - 2024-10-03
 
 ### Fixed
@@ -2425,6 +2442,7 @@ https://textual.textualize.io/blog/2022/11/08/version-040/#version-040
 - New handler system for messages that doesn't require inheritance
 - Improved traceback handling
 
+[0.83.0]: https://github.com/Textualize/textual/compare/v0.82.0...v0.83.0
 [0.82.0]: https://github.com/Textualize/textual/compare/v0.81.0...v0.82.0
 [0.81.0]: https://github.com/Textualize/textual/compare/v0.80.1...v0.81.0
 [0.80.1]: https://github.com/Textualize/textual/compare/v0.80.0...v0.80.1
