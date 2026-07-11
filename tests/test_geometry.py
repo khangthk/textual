@@ -1,6 +1,8 @@
+from typing import Literal
+
 import pytest
 
-from textual.geometry import Offset, Region, Size, Spacing, clamp
+from textual.geometry import Offset, Region, Shape, Size, Spacing, clamp
 
 
 def test_dimensions_region():
@@ -76,6 +78,11 @@ def test_offset_bool():
     assert Offset(0, 1)
     assert Offset(0, -1)
     assert not Offset(0, 0)
+
+
+def test_offset_transpose():
+    assert Offset(1, 2).transpose == (2, 1)
+    assert Offset(5, 10).transpose == (10, 5)
 
 
 def test_offset_is_origin():
@@ -186,6 +193,7 @@ def test_region_top_right():
 
 def test_region_bottom_right():
     assert Region(1, 2, 3, 4).bottom_right == Offset(4, 6)
+    assert Region(1, 2, 3, 4).bottom_right_inclusive == Offset(3, 5)
 
 
 def test_region_add():
@@ -466,20 +474,23 @@ def test_translate_inside():
 
 
 def test_inflect():
+    assert Region(0, 0, 1, 1).inflect() == Region(1, 1, 1, 1)
+    assert Region(0, 0, 1, 1).inflect(margin=Spacing.unpack(1)) == Region(2, 2, 1, 1)
+
     # Default inflect positive
     assert Region(10, 10, 30, 20).inflect(margin=Spacing(2, 2, 2, 2)) == Region(
-        44, 34, 30, 20
+        42, 32, 30, 20
     )
 
     # Inflect y axis negative
     assert Region(10, 10, 30, 20).inflect(
         y_axis=-1, margin=Spacing(2, 2, 2, 2)
-    ) == Region(44, -14, 30, 20)
+    ) == Region(42, -12, 30, 20)
 
     # Inflect y axis negative
     assert Region(10, 10, 30, 20).inflect(
         x_axis=-1, margin=Spacing(2, 2, 2, 2)
-    ) == Region(-24, 34, 30, 20)
+    ) == Region(-22, 32, 30, 20)
 
 
 def test_size_with_height():
@@ -517,3 +528,306 @@ def test_get_spacing_between(region1: Region, region2: Region, expected: Spacing
     spacing = region1.get_spacing_between(region2)
     assert spacing == expected
     assert region1.shrink(spacing) == region2
+
+
+@pytest.mark.parametrize(
+    "constrain_x,constrain_y,margin,region,container,expected",
+    [
+        # A null-op
+        (
+            "none",
+            "none",
+            Spacing.unpack(0),
+            Region(0, 0, 10, 10),
+            Region(0, 0, 100, 100),
+            Region(0, 0, 10, 10),
+        ),
+        # Negative offset gets moved to 0, 0 + margin
+        (
+            "inside",
+            "inside",
+            Spacing.unpack(1),
+            Region(-5, -5, 10, 10),
+            Region(0, 0, 100, 100),
+            Region(1, 1, 10, 10),
+        ),
+        # Overlapping region gets moved in, with offset
+        (
+            "inside",
+            "inside",
+            Spacing.unpack(1),
+            Region(95, 95, 10, 10),
+            Region(0, 0, 100, 100),
+            Region(89, 89, 10, 10),
+        ),
+        # X coordinate moved inside, region reflected around it's Y axis
+        (
+            "inside",
+            "inflect",
+            Spacing.unpack(1),
+            Region(-5, -5, 10, 10),
+            Region(0, 0, 100, 100),
+            Region(1, 6, 10, 10),
+        ),
+    ],
+)
+def test_constrain(
+    constrain_x: Literal["none", "inside", "inflect"],
+    constrain_y: Literal["none", "inside", "inflect"],
+    margin: Spacing,
+    region: Region,
+    container: Region,
+    expected: Region,
+) -> None:
+    assert region.constrain(constrain_x, constrain_y, margin, container) == expected
+
+
+def test_shape_null():
+    """Test a null shape (shape with no regions)."""
+    null_shape = Shape([])
+    assert isinstance(repr(null_shape), str)
+    assert not null_shape
+    assert not null_shape.contains_point(Offset())
+
+
+@pytest.mark.parametrize(
+    "shape,point,expected",
+    [
+        (
+            Shape([Region(10, 10, 5, 5)]),
+            Offset(0, 0),
+            False,
+        ),
+        (
+            Shape([Region(10, 10, 5, 5)]),
+            Offset(10, 0),
+            False,
+        ),
+        (
+            Shape([Region(10, 10, 5, 5)]),
+            Offset(10, 1),
+            False,
+        ),
+        (
+            Shape([Region(10, 10, 5, 5)]),
+            Offset(10, 10),
+            True,
+        ),
+        (
+            Shape([Region(10, 10, 5, 5)]),
+            Offset(14, 10),
+            True,
+        ),
+        (
+            Shape([Region(10, 10, 5, 5)]),
+            Offset(14, 14),
+            True,
+        ),
+        (
+            Shape([Region(10, 10, 5, 5)]),
+            Offset(15, 10),
+            False,
+        ),
+    ],
+)
+def test_shape_contains_point_simple(
+    shape: Shape, point: Offset, expected: bool
+) -> None:
+    """Test shape.contains_point"""
+    assert isinstance(repr(shape), str)
+    assert shape.contains_point(point) == expected
+
+
+def build_grid_snapshot(shape: Shape) -> str:
+    """Build a string with a 2D grid of results from contains_point."""
+
+    # Add a padding of 2 cells around the output, for clarity.
+    width = shape.bounds.right + 2
+    height = shape.bounds.bottom + 2
+
+    map: list[list[str]] = []
+    for y in range(height):
+        map.append([".X"[shape.contains_point(Offset(x, y))] for x in range(width)])
+
+    return "\n".join("".join(line) for line in map)
+
+
+def test_shape_contains_point():
+    """Test contains_point with multi region shape"""
+    shape = Shape(
+        [
+            Region(2, 2, 4, 4),
+            Region(3, 5, 5, 3),
+        ]
+    )
+    expected = """\
+..........
+..........
+..XXXX....
+..XXXX....
+..XXXX....
+..XXXXXX..
+...XXXXX..
+...XXXXX..
+..........
+.........."""
+    result = build_grid_snapshot(shape)
+    print(repr(result))
+    assert result == expected
+
+
+def test_selection_bounds_contains_point():
+    """Test selection bounds shape and contains_point"""
+
+    shape = Shape.selection_bounds(
+        Region(0, 0, 10, 8),
+        Offset(4, 1),
+        Offset(6, 4),
+    )
+    expected = """\
+............
+....XXXXXX..
+XXXXXXXXXX..
+XXXXXXXXXX..
+XXXXXX......
+............
+............"""
+    result = build_grid_snapshot(shape)
+    print(result)
+    assert result == expected
+
+
+def test_selection_bounds_contains_point_simple_case():
+    """Test selection bounds shape and contains_point"""
+
+    shape = Shape.selection_bounds(
+        Region(0, 0, 10, 8),
+        Offset(0, 1),
+        Offset(10, 4),
+    )
+    # Should result in a single region
+    assert len(shape.regions) == 1
+    expected = """\
+............
+XXXXXXXXXX..
+XXXXXXXXXX..
+XXXXXXXXXX..
+XXXXXXXXXX..
+............
+............"""
+    result = build_grid_snapshot(shape)
+    print(result)
+    assert result == expected
+
+
+def test_selection_bounds_contains_point_single_line():
+    """Test selection bonds shape and single point where the offsets are on the same line"""
+    shape = Shape.selection_bounds(
+        Region(0, 0, 10, 8),
+        Offset(2, 1),
+        Offset(6, 1),
+    )
+    expected = """\
+........
+..XXXX..
+........
+........"""
+    result = build_grid_snapshot(shape)
+    print(result)
+    assert result == expected
+
+
+def test_selection_bounds_contains_point_two_lines():
+    """Test selection bonds shape and single point where the offsets are over two lines"""
+    shape = Shape.selection_bounds(
+        Region(0, 0, 10, 8),
+        Offset(2, 1),
+        Offset(6, 2),
+    )
+    expected = """\
+............
+..XXXXXXXX..
+XXXXXX......
+............
+............"""
+    result = build_grid_snapshot(shape)
+    print(result)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "bounds,area",
+    [
+        # Simple case, selection defines a box
+        (
+            Shape.selection_bounds(
+                Region(0, 0, 10, 8),
+                Offset(0, 0),
+                Offset(10, 2),
+            ),
+            30,
+        ),
+        # Start of selection is inset
+        (
+            Shape.selection_bounds(
+                Region(0, 0, 10, 8),
+                Offset(1, 0),
+                Offset(10, 2),
+            ),
+            29,
+        ),
+        # End of selection is inset
+        (
+            Shape.selection_bounds(
+                Region(0, 0, 10, 8),
+                Offset(1, 0),
+                Offset(9, 2),
+            ),
+            28,
+        ),
+    ],
+)
+def test_shape_area(bounds, area):
+    print(bounds._regions)
+    assert bounds.area == area
+
+
+@pytest.mark.parametrize(
+    "bounds,region,expected",
+    [
+        # Simple case
+        (
+            Shape.selection_bounds(
+                Region(0, 0, 10, 8),
+                Offset(0, 0),
+                Offset(0, 6),
+            ),
+            Region(0, 0, 1, 1),
+            True,
+        ),
+        # Outside first line
+        (
+            Shape.selection_bounds(
+                Region(0, 0, 10, 8),
+                Offset(2, 0),
+                Offset(0, 6),
+            ),
+            Region(0, 0, 1, 1),
+            False,
+        ),
+        # Point inside first line
+        (
+            Shape.selection_bounds(
+                Region(0, 0, 10, 8),
+                Offset(2, 0),
+                Offset(0, 6),
+            ),
+            Region(2, 0, 1, 1),
+            True,
+        ),
+    ],
+)
+def test_selection_bounds_overlaps(bounds: Shape, region: Region, expected: bool):
+    overlaps = bounds.overlaps(region)
+    print(overlaps)
+    assert overlaps is expected

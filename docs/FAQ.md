@@ -38,7 +38,9 @@ pip install textual-dev -U
 <a name="how-can-i-select-and-copy-text-in-a-textual-app"></a>
 ## How can I select and copy text in a Textual app?
 
-Running a Textual app puts your terminal in to *application mode* which disables clicking and dragging to select text.
+Textual supports text selection for most widgets, via click and drag. Press ctrl+c to copy.
+
+For widgets that don't yet support text selection, you can try and use your terminal's builtin support.
 Most terminal emulators offer a modifier key which you can hold while you click and drag to restore the behavior you
 may expect from the command line. The exact modifier key depends on the terminal and platform you are running on.
 
@@ -220,21 +222,6 @@ Greetings("Well hello", "there").run()
 
 ---
 
-<a name="no-widget-called-textlog"></a>
-## No widget called TextLog
-
-The `TextLog` widget was renamed to `RichLog` in Textual 0.32.0.
-You will need to replace all references to `TextLog` in your code, with `RichLog`.
-Most IDEs will have a search and replace function which will help you do this.
-
-Here's how you should import RichLog:
-
-```python
-from textual.widgets import RichLog
-```
-
----
-
 <a name="why-do-some-key-combinations-never-make-it-to-my-app"></a>
 ## Why do some key combinations never make it to my app?
 
@@ -310,7 +297,7 @@ We recommend any of the following terminals:
 
 Textual will not generate escape sequences for the 16 themeable *ANSI* colors.
 
-This is an intentional design decision we took for for the following reasons:
+This is an intentional design decision we took for the following reasons:
 
 - Not everyone has a carefully chosen ANSI color theme. Color combinations which may look fine on your system, may be unreadable on another machine. There is very little an app author or Textual can do to resolve this. Asking users to simply pick a better theme is not a good solution, since not all users will know how.
 - ANSI colors can't be manipulated in the way Textual can do with other colors. Textual can blend colors and produce light and dark shades from an original color, which is used to create more readable text and user interfaces. Color blending will also be used to power future accessibility features.
@@ -322,19 +309,6 @@ There is currently a light and dark version of the design system, but more are p
 !!! tip "Changed in version 0.80.0"
 
     Textual added an `ansi_color` boolean to App. If you set this to `True`, then Textual will not attempt to convert ANSI colors. Note that you will lose transparency effects if you enable this setting.
-
----
-
-<a name="why-doesnt-the-datatable-scroll-programmatically"></a>
-## Why doesn't the `DataTable` scroll programmatically?
-
-If scrolling in your `DataTable` is _apparently_ broken, it may be because your `DataTable` is using the default value of `height: auto`.
-This means that the table will be sized to fit its rows without scrolling, which may cause the *container* (typically the screen) to scroll.
-If you would like the table itself to scroll, set the height to something other than `auto`, like `100%`.
-
-!!! note
-
-    As of Textual v0.31.0 the `max-height` of a `DataTable` is set to `100%`, this will mean that the above is no longer the default experience.
 
 ---
 

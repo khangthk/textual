@@ -4,6 +4,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
+from textual.content import Content, ContentText
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
@@ -16,21 +17,27 @@ __all__ = ["Collapsible", "CollapsibleTitle"]
 class CollapsibleTitle(Static, can_focus=True):
     """Title and symbol for the Collapsible."""
 
+    BINDING_GROUP_TITLE = "Collapsible"
+
+    ALLOW_SELECT = False
     DEFAULT_CSS = """
     CollapsibleTitle {
         width: auto;
-        height: auto;
-        padding: 0 1 0 1;
-    }
+        height: auto;        
+        padding: 0 1;        
+        text-style: $block-cursor-blurred-text-style;
+        color: $block-cursor-blurred-foreground;
+        pointer: pointer;
 
-    CollapsibleTitle:hover {
-        background: $foreground 10%;
-        color: $text;
-    }
-
-    CollapsibleTitle:focus {
-        background: $accent;
-        color: $text;
+        &:hover {
+            background: $block-hover-background;
+            color: $foreground;
+        }
+        &:focus {
+            text-style: $block-cursor-text-style;
+            background: $block-cursor-background;
+            color: $block-cursor-foreground;
+        }
     }
     """
 
@@ -44,12 +51,12 @@ class CollapsibleTitle(Static, can_focus=True):
     """
 
     collapsed = reactive(True)
-    label = reactive("Toggle")
+    label: reactive[ContentText] = reactive(Content("Toggle"))
 
     def __init__(
         self,
         *,
-        label: str,
+        label: ContentText,
         collapsed_symbol: str,
         expanded_symbol: str,
         collapsed: bool,
@@ -57,10 +64,8 @@ class CollapsibleTitle(Static, can_focus=True):
         super().__init__()
         self.collapsed_symbol = collapsed_symbol
         self.expanded_symbol = expanded_symbol
-        self.label = label
+        self.label = Content.from_text(label)
         self.collapsed = collapsed
-        self._collapsed_label = f"{collapsed_symbol} {label}"
-        self._expanded_label = f"{expanded_symbol} {label}"
 
     class Toggle(Message):
         """Request toggle."""
@@ -74,24 +79,27 @@ class CollapsibleTitle(Static, can_focus=True):
         """Toggle the state of the parent collapsible."""
         self.post_message(self.Toggle())
 
-    def _watch_label(self, label: str) -> None:
-        self._collapsed_label = f"{self.collapsed_symbol} {label}"
-        self._expanded_label = f"{self.expanded_symbol} {label}"
+    def validate_label(self, label: ContentText) -> Content:
+        return Content.from_text(label)
+
+    def _update_label(self) -> None:
+        assert isinstance(self.label, Content)
         if self.collapsed:
-            self.update(self._collapsed_label)
+            self.update(Content.assemble(self.collapsed_symbol, " ", self.label))
         else:
-            self.update(self._expanded_label)
+            self.update(Content.assemble(self.expanded_symbol, " ", self.label))
+
+    def _watch_label(self) -> None:
+        self._update_label()
 
     def _watch_collapsed(self, collapsed: bool) -> None:
-        if collapsed:
-            self.update(self._collapsed_label)
-        else:
-            self.update(self._expanded_label)
+        self._update_label()
 
 
 class Collapsible(Widget):
     """A collapsible container."""
 
+    ALLOW_MAXIMIZE = True
     collapsed = reactive(True, init=False)
     title = reactive("Toggle")
 
@@ -99,14 +107,22 @@ class Collapsible(Widget):
     Collapsible {
         width: 1fr;
         height: auto;
-        background: $boost;
+        background: $surface;
         border-top: hkey $background;
         padding-bottom: 1;
         padding-left: 1;
-    }
 
-    Collapsible.-collapsed > Contents {
-        display: none;
+        &:focus-within {
+            background-tint: $foreground 5%;
+        }
+
+        &.-collapsed > Contents {
+            display: none;   
+        }
+        &:ansi {
+            border-top: hkey ansi_blue;
+            background: $panel;
+        }
     }
     """
 
@@ -151,7 +167,7 @@ class Collapsible(Widget):
         Contents {
             width: 100%;
             height: auto;
-            padding: 1 0 0 3;
+            padding: 1 0 0 3;            
         }
         """
 
@@ -202,6 +218,8 @@ class Collapsible(Widget):
             self.post_message(self.Collapsed(self))
         else:
             self.post_message(self.Expanded(self))
+        if self.is_mounted:
+            self.call_after_refresh(self.scroll_visible)
 
     def _update_collapsed(self, collapsed: bool) -> None:
         """Update children to match collapsed state."""
@@ -217,7 +235,8 @@ class Collapsible(Widget):
 
     def compose(self) -> ComposeResult:
         yield self._title
-        yield self.Contents(*self._contents_list)
+        with self.Contents():
+            yield from self._contents_list
 
     def compose_add_child(self, widget: Widget) -> None:
         """When using the context manager compose syntax, we want to attach nodes to the contents.

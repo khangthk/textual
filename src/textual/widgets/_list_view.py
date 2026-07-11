@@ -4,7 +4,8 @@ from typing import ClassVar, Iterable, Optional
 
 from typing_extensions import TypeGuard
 
-from textual import _widget_navigation
+from textual._loop import loop_from_index
+from textual.await_complete import AwaitComplete
 from textual.await_remove import AwaitRemove
 from textual.binding import Binding, BindingType
 from textual.containers import VerticalScroll
@@ -25,6 +26,40 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
         index: The index in the list that's currently highlighted.
     """
 
+    ALLOW_MAXIMIZE = True
+
+    DEFAULT_CSS = """
+    ListView {
+        background: $surface;
+        & > ListItem {
+            color: $foreground;
+            height: auto;
+            overflow: hidden hidden;
+            width: 1fr;
+
+            &.-hovered {
+                background: $block-hover-background;
+            }
+            
+            &.-highlight {
+                color: $block-cursor-blurred-foreground;
+                background: $block-cursor-blurred-background;
+                text-style: $block-cursor-blurred-text-style;
+            }
+        }
+
+        &:focus {
+            background-tint: $foreground 5%;
+            & > ListItem.-highlight {
+                color: $block-cursor-foreground;
+                background: $block-cursor-background;
+                text-style: $block-cursor-text-style;
+            }
+        }
+
+    }
+    """
+
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "select_cursor", "Select", show=False),
         Binding("up", "cursor_up", "Cursor up", show=False),
@@ -38,7 +73,7 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
     | down | Move the cursor down. |
     """
 
-    index = reactive[Optional[int]](0, always_update=True, init=False)
+    index = reactive[Optional[int]](None, init=False)
     """The index of the currently highlighted item."""
 
     class Highlighted(Message):
@@ -78,12 +113,14 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
         ALLOW_SELECTOR_MATCH = {"item"}
         """Additional message attributes that can be used with the [`on` decorator][textual.on]."""
 
-        def __init__(self, list_view: ListView, item: ListItem) -> None:
+        def __init__(self, list_view: ListView, item: ListItem, index: int) -> None:
             super().__init__()
             self.list_view: ListView = list_view
             """The view that contains the item selected."""
             self.item: ListItem = item
             """The selected item."""
+            self.index = index
+            """Index of the selected item."""
 
         @property
         def control(self) -> ListView:
@@ -117,17 +154,20 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
         super().__init__(
             *children, name=name, id=id, classes=classes, disabled=disabled
         )
-        # Set the index to the given initial index, or the first available index after.
-        self._index = _widget_navigation.find_next_enabled(
-            children,
-            anchor=initial_index if initial_index is not None else None,
-            direction=1,
-            with_anchor=True,
-        )
+        self._initial_index = initial_index
 
     def _on_mount(self, _: Mount) -> None:
         """Ensure the ListView is fully-settled after mounting."""
-        self.index = self._index
+
+        if self._initial_index is not None and self.children:
+            index = self._initial_index
+            if index >= len(self.children):
+                index = 0
+            if self._nodes[index].disabled:
+                for index, node in loop_from_index(self._nodes, index, wrap=True):
+                    if not node.disabled:
+                        break
+            self.index = index
 
     @property
     def highlighted_child(self) -> ListItem | None:
@@ -165,16 +205,30 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
 
     def watch_index(self, old_index: int | None, new_index: int | None) -> None:
         """Updates the highlighting when the index changes."""
+
+        if new_index is not None:
+            selected_widget = self._nodes[new_index]
+            if selected_widget.region:
+                self.scroll_to_widget(self._nodes[new_index], animate=False)
+            else:
+                # Call after refresh to permit a refresh operation
+                self.call_after_refresh(
+                    self.scroll_to_widget, selected_widget, animate=False
+                )
+
         if self._is_valid_index(old_index):
             old_child = self._nodes[old_index]
             assert isinstance(old_child, ListItem)
             old_child.highlighted = False
 
-        if self._is_valid_index(new_index) and not self._nodes[new_index].disabled:
+        if (
+            new_index is not None
+            and self._is_valid_index(new_index)
+            and not self._nodes[new_index].disabled
+        ):
             new_child = self._nodes[new_index]
             assert isinstance(new_child, ListItem)
             new_child.highlighted = True
-            self._scroll_highlighted_region()
             self.post_message(self.Highlighted(self, new_child))
         else:
             self.post_message(self.Highlighted(self, None))
@@ -190,8 +244,6 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
                 until the DOM has been updated with the new child items.
         """
         await_mount = self.mount(*items)
-        if len(self) == 1:
-            self.index = 0
         return await_mount
 
     def append(self, item: ListItem) -> AwaitMount:
@@ -231,7 +283,7 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
         await_mount = self.mount(*items, before=index)
         return await_mount
 
-    def pop(self, index: Optional[int] = None) -> AwaitRemove:
+    def pop(self, index: Optional[int] = None) -> AwaitComplete:
         """Remove last ListItem from ListView or
            Remove ListItem from ListView by index
 
@@ -242,13 +294,31 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
             An awaitable that yields control to the event loop until
                 the DOM has been updated to reflect item being removed.
         """
-        if index is None:
-            await_remove = self.query("ListItem").last().remove()
-        else:
-            await_remove = self.query("ListItem")[index].remove()
-        return await_remove
+        if len(self) == 0:
+            raise IndexError("pop from empty list")
 
-    def remove_items(self, indices: Iterable[int]) -> AwaitRemove:
+        index = index if index is not None else -1
+        item_to_remove = self.query("ListItem")[index]
+        normalized_index = index if index >= 0 else index + len(self)
+
+        async def do_pop() -> None:
+            """Remove the item and update the highlighted index."""
+            await item_to_remove.remove()
+            if self.index is not None:
+                if normalized_index < self.index:
+                    self.index -= 1
+                elif normalized_index == self.index:
+                    old_index = self.index
+                    # Force a re-validation of the index
+                    self.index = self.index
+                    # If the index hasn't changed, the watcher won't be called
+                    # but we need to update the highlighted item
+                    if old_index == self.index:
+                        self.watch_index(old_index, self.index)
+
+        return AwaitComplete(do_pop())
+
+    def remove_items(self, indices: Iterable[int]) -> AwaitComplete:
         """Remove ListItems from ListView by indices
 
         Args:
@@ -259,52 +329,67 @@ class ListView(VerticalScroll, can_focus=True, can_focus_children=False):
         """
         items = self.query("ListItem")
         items_to_remove = [items[index] for index in indices]
-        await_remove = self.remove_children(items_to_remove)
-        return await_remove
+        normalized_indices = set(
+            index if index >= 0 else index + len(self) for index in indices
+        )
+
+        async def do_remove_items() -> None:
+            """Remove the items and update the highlighted index."""
+            await self.remove_children(items_to_remove)
+            if self.index is not None:
+                removed_before_highlighted = sum(
+                    1 for index in normalized_indices if index < self.index
+                )
+                if removed_before_highlighted:
+                    self.index -= removed_before_highlighted
+                elif self.index in normalized_indices:
+                    old_index = self.index
+                    # Force a re-validation of the index
+                    self.index = self.index
+                    # If the index hasn't changed, the watcher won't be called
+                    # but we need to update the highlighted item
+                    if old_index == self.index:
+                        self.watch_index(old_index, self.index)
+
+        return AwaitComplete(do_remove_items())
 
     def action_select_cursor(self) -> None:
         """Select the current item in the list."""
         selected_child = self.highlighted_child
         if selected_child is None:
             return
-        self.post_message(self.Selected(self, selected_child))
+        self.post_message(self.Selected(self, selected_child, self.index))
 
     def action_cursor_down(self) -> None:
         """Highlight the next item in the list."""
-        candidate = _widget_navigation.find_next_enabled(
-            self._nodes,
-            anchor=self.index,
-            direction=1,
-        )
-        if self.index is not None and candidate is not None and candidate < self.index:
-            return  # Avoid wrapping around.
-
-        self.index = candidate
+        if self.index is None:
+            if self._nodes:
+                self.index = 0
+        else:
+            index = self.index
+            for index, item in loop_from_index(self._nodes, self.index, wrap=False):
+                if not item.disabled:
+                    self.index = index
+                    break
 
     def action_cursor_up(self) -> None:
         """Highlight the previous item in the list."""
-        candidate = _widget_navigation.find_next_enabled(
-            self._nodes,
-            anchor=self.index,
-            direction=-1,
-        )
-        if self.index is not None and candidate is not None and candidate > self.index:
-            return  # Avoid wrapping around.
-
-        self.index = candidate
+        if self.index is None:
+            if self._nodes:
+                self.index = len(self._nodes) - 1
+        else:
+            for index, item in loop_from_index(
+                self._nodes, self.index, direction=-1, wrap=False
+            ):
+                if not item.disabled:
+                    self.index = index
+                    break
 
     def _on_list_item__child_clicked(self, event: ListItem._ChildClicked) -> None:
         event.stop()
         self.focus()
         self.index = self._nodes.index(event.item)
-        self.post_message(self.Selected(self, event.item))
-
-    def _scroll_highlighted_region(self) -> None:
-        """Used to keep the highlighted index within vision"""
-        if self.highlighted_child is not None:
-            self.call_after_refresh(
-                self.scroll_to_widget, self.highlighted_child, animate=False
-            )
+        self.post_message(self.Selected(self, event.item, self.index))
 
     def __len__(self) -> int:
         """Compute the length (in number of items) of the list view."""

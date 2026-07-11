@@ -138,8 +138,8 @@ class ScrollBarRender:
             start_index, start_bar = divmod(max(0, start), len_bars)
             end_index, end_bar = divmod(max(0, end), len_bars)
 
-            upper = {"@mouse.up": "scroll_up"}
-            lower = {"@mouse.up": "scroll_down"}
+            upper = {"@mouse.down": "scroll_up"}
+            lower = {"@mouse.down": "scroll_down"}
 
             upper_back_segment = Segment(blank, _Style(bgcolor=back, meta=upper))
             lower_back_segment = Segment(blank, _Style(bgcolor=back, meta=lower))
@@ -246,6 +246,11 @@ class ScrollBar(Widget):
     ```
     """
 
+    DEFAULT_CLASSES = "-textual-system"
+
+    # Nothing to select in scrollbars
+    ALLOW_SELECT = False
+
     def __init__(
         self, vertical: bool = True, name: str | None = None, *, thickness: int = 1
     ) -> None:
@@ -253,11 +258,11 @@ class ScrollBar(Widget):
         self.thickness = thickness
         self.grabbed_position: float = 0
         super().__init__(name=name)
-        self.auto_links = False
+        self.set_reactive(ScrollBar.auto_links, False)
 
     window_virtual_size: Reactive[int] = Reactive(100)
     window_size: Reactive[int] = Reactive(0)
-    position: Reactive[int] = Reactive(0)
+    position: Reactive[float] = Reactive(0)
     mouse_over: Reactive[bool] = Reactive(False)
     grabbed: Reactive[Offset | None] = Reactive(None)
 
@@ -268,6 +273,10 @@ class ScrollBar(Widget):
         yield "position", self.position
         if self.thickness > 1:
             yield "thickness", self.thickness
+
+    def validate_position(self, position: float) -> float:
+        """Position has a granulatory of 1/8 of a cell."""
+        return int(position * 8) / 8
 
     def render(self) -> RenderableType:
         assert self.parent is not None
@@ -281,6 +290,9 @@ class ScrollBar(Widget):
         else:
             background = styles.scrollbar_background
             color = styles.scrollbar_color
+        if background.a < 1:
+            base_background, _ = self.parent.background_colors
+            background = base_background + background
         color = background + color
         scrollbar_style = Style.from_color(color.rich_color, background.rich_color)
         if self.screen.styles.scrollbar_color.a == 0:
@@ -348,11 +360,19 @@ class ScrollBar(Widget):
         event.stop()
 
     def _on_mouse_capture(self, event: events.MouseCapture) -> None:
+        self.app._realtime_animation_begin()
+        self.styles.pointer = "grabbing"
+        if isinstance(self._parent, Widget):
+            self._parent.release_anchor()
         self.grabbed = event.mouse_position
         self.grabbed_position = self.position
 
     def _on_mouse_release(self, event: events.MouseRelease) -> None:
+        self.app._realtime_animation_complete()
+        self.styles.pointer = "default"
         self.grabbed = None
+        if self.vertical and isinstance(self.parent, Widget):
+            self.parent._check_anchor()
         event.stop()
 
     async def _on_mouse_move(self, event: events.MouseMove) -> None:
@@ -361,23 +381,19 @@ class ScrollBar(Widget):
             y: float | None = None
             if self.vertical:
                 virtual_size = self.window_virtual_size
-                y = round(
-                    self.grabbed_position
-                    + (
-                        (event.screen_y - self.grabbed.y)
-                        * (virtual_size / self.window_size)
-                    )
+                y = self.grabbed_position + (
+                    (event._screen_y - self.grabbed.y)
+                    * (virtual_size / self.window_size)
                 )
             else:
                 virtual_size = self.window_virtual_size
-                x = round(
-                    self.grabbed_position
-                    + (
-                        (event.screen_x - self.grabbed.x)
-                        * (virtual_size / self.window_size)
-                    )
+                x = self.grabbed_position + (
+                    (event._screen_x - self.grabbed.x)
+                    * (virtual_size / self.window_size)
                 )
-            self.post_message(ScrollTo(x=x, y=y))
+            self.post_message(
+                ScrollTo(x=x, y=y, animate=not self.app.supports_smooth_scrolling)
+            )
         event.stop()
 
     async def _on_click(self, event: events.Click) -> None:
@@ -388,10 +404,7 @@ class ScrollBarCorner(Widget):
     """Widget which fills the gap between horizontal and vertical scrollbars,
     should they both be present."""
 
-    def __init__(self, name: str | None = None):
-        super().__init__(name=name)
-
-    def render(self) -> RenderableType:
+    def render(self) -> Blank:
         assert self.parent is not None
         styles = self.parent.styles
         color = styles.scrollbar_corner_color

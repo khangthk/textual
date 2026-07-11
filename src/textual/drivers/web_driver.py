@@ -62,12 +62,18 @@ class WebDriver(Driver):
         self.fileno = sys.__stdout__.fileno()
         self._write = partial(os.write, self.fileno)
         self.exit_event = Event()
-        self._key_thread: Thread = Thread(target=self.run_input_thread)
+        self._key_thread: Thread = Thread(
+            target=self.run_input_thread, name="textual-input"
+        )
         self._input_reader = InputReader()
 
         self._deliveries: dict[str, BinaryIO | TextIO] = {}
         """Maps delivery keys to file-like objects, used
         for delivering files to the browser."""
+
+    @property
+    def is_web(self) -> bool:
+        return True
 
     def write(self, data: str) -> None:
         """Write string data to the output device, which may be piped to
@@ -191,12 +197,12 @@ class WebDriver(Driver):
                         if packet_type == "D":
                             # Treat as stdin
                             for event in parser.feed(decode(payload)):
-                                self.process_event(event)
+                                self.process_message(event)
                         else:
                             # Process meta information separately
                             self._on_meta(packet_type, payload)
                 for event in parser.tick():
-                    self.process_event(event)
+                    self.process_message(event)
         except _ExitInput:
             pass
         except Exception:

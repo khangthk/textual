@@ -14,7 +14,23 @@ from textual.widget import Widget
 from textual.widgets import Input, Label
 
 
-def test_query():
+async def test_query_errors():
+    app = App()
+    async with app.run_test():
+        with pytest.raises(InvalidQueryFormat):
+            app.query_one("foo_bar")
+
+        with pytest.raises(InvalidQueryFormat):
+            app.query("foo_bar")
+
+        with pytest.raises(InvalidQueryFormat):
+            app.query("1")
+
+        with pytest.raises(InvalidQueryFormat):
+            app.query_one("1")
+
+
+async def test_query():
     class View(Widget):
         pass
 
@@ -143,7 +159,7 @@ def test_query():
             _ = app.query(".float").last(View)
 
 
-def test_query_classes():
+async def test_query_classes():
     class App(Widget):
         pass
 
@@ -209,7 +225,7 @@ def test_query_classes():
     assert len(app.query(".test")) == 0
 
 
-def test_invalid_query():
+async def test_invalid_query():
     class App(Widget):
         pass
 
@@ -348,3 +364,41 @@ async def test_query_focus_blur():
         # Focus non existing
         app.query("#egg").focus()
         assert app.focused.id == "bar"
+
+
+async def test_query_error():
+    class QueryApp(App):
+        def compose(self) -> ComposeResult:
+            yield Input(id="foo")
+
+    app = QueryApp()
+    async with app.run_test():
+        with pytest.raises(WrongType):
+            # Asking for a Label, but the widget is an Input
+            app.query_one("#foo", Label)
+
+        # Widget is an Input so this works
+        foo = app.query_one("#foo", Input)
+        assert isinstance(foo, Input)
+
+
+async def test_query_one_optional():
+    class QueryApp(App):
+        AUTO_FOCUS = None
+
+        def compose(self) -> ComposeResult:
+            yield Input(id="foo")
+            yield Input(classes="bar")
+
+    app = QueryApp()
+    async with app.run_test():
+        assert app.query_one_optional("TextArea") is None
+        assert app.query_one_optional("Input#bar") is None
+
+        assert isinstance(app.query_one_optional("Input"), Input)
+        assert isinstance(app.query_one_optional(".bar"), Input)
+
+        # Verify that WrongType exceptions still propagate
+        with pytest.raises(WrongType):
+            # Asking for a Label, but the widget is an Input
+            app.query_one_optional("#foo", Label)

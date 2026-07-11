@@ -153,8 +153,8 @@ This works well if you are using an async API like `httpx`, but if your API does
 You can create threads by setting `thread=True` on the `run_worker` method or the `work` decorator.
 The API for thread workers is identical to async workers, but there are a few differences you need to be aware of when writing code for thread workers.
 
-The first difference is that you should avoid calling methods on your UI directly, or setting reactive variables.
-You can work around this with the [App.call_from_thread][textual.app.App.call_from_thread] method which schedules a call in the main thread.
+The first difference is that you should **avoid calling methods on your UI directly** from a threaded worker, or setting reactive variables.
+You can work around this with the [App.call_from_thread][textual.app.App.call_from_thread] method which runs your function from the main thread.
 
 The second difference is that you can't cancel threads in the same way as coroutines, but you *can* manually check if the worker was cancelled.
 
@@ -176,6 +176,6 @@ Note the use of [get_current_worker][textual.worker.get_current_worker] which th
 
 #### Posting messages
 
-Most Textual functions are not thread-safe which means you will need to use `call_from_thread` to run them from a thread worker.
+Most Textual functions are not thread-safe which means you will need to use [call_from_thread][textual.app.App.call_from_thread] to run them from a thread worker.
 An exception would be [post_message][textual.widget.Widget.post_message] which *is* thread-safe.
 If your worker needs to make multiple updates to the UI, it is a good idea to send [custom messages](./events.md) and let the message handler update the state of the UI.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Iterable, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, Hashable, Iterable, TypeVar
 
 import rich.repr
 from rich.console import RenderableType
@@ -12,7 +12,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.reactive import var
+from textual.reactive import reactive, var
+from textual.timer import Timer
 from textual.widgets import Static
 from textual.widgets._option_list import Option, OptionList
 
@@ -22,14 +23,18 @@ if TYPE_CHECKING:
     from textual.app import ComposeResult
 
 
+class NonSelectableStatic(Static):
+    ALLOW_SELECT = False
+
+
 class NoSelection:
-    """Used by the `Select` widget to flag the unselected state. See [`Select.BLANK`][textual.widgets.Select.BLANK]."""
+    """Used by the `Select` widget to flag the unselected state. See [`Select.NULL`][textual.widgets.Select.NULL]."""
 
     def __repr__(self) -> str:
-        return "Select.BLANK"
+        return "Select.NULL"
 
 
-BLANK = NoSelection()
+NULL = NoSelection()
 
 
 class InvalidSelectValueError(Exception):
@@ -45,21 +50,7 @@ class SelectOverlay(OptionList):
 
     BINDINGS = [("escape", "dismiss", "Dismiss menu")]
 
-    DEFAULT_CSS = """
-    SelectOverlay {
-        border: tall $background;
-        background: $panel;
-        color: $text;
-        width: 100%;
-        padding: 0 1;
-    }
-    SelectOverlay:focus {
-        border: tall $background;
-    }
-    SelectOverlay > .option-list--option {
-        padding: 0 1;
-    }
-    """
+    ALLOW_SELECT = False
 
     @dataclass
     class Dismiss(Message):
@@ -75,6 +66,57 @@ class SelectOverlay(OptionList):
         option_index: int
         """The index of the new selection."""
 
+    def __init__(self, type_to_search: bool = True) -> None:
+        super().__init__()
+        self._type_to_search = type_to_search
+        """If True (default), the user can type to search for a matching option and the cursor will jump to it."""
+
+        self._search_query: str = ""
+        """The current search query used to find a matching option and jump to it."""
+
+        self._search_reset_delay: float = 0.7
+        """The number of seconds to wait after the most recent key press before resetting the search query."""
+
+    def on_mount(self) -> None:
+        def reset_query() -> None:
+            self._search_query = ""
+
+        self._search_reset_timer = Timer(
+            self, self._search_reset_delay, callback=reset_query
+        )
+
+    def watch_has_focus(self, value: bool) -> None:
+        self._search_query = ""
+        if value:
+            self._search_reset_timer._start()
+        else:
+            self._search_reset_timer.reset()
+            self._search_reset_timer.stop()
+        super().watch_has_focus(value)
+
+    async def _on_key(self, event: events.Key) -> None:
+        if not self._type_to_search:
+            return
+
+        self._search_reset_timer.reset()
+
+        if event.character is not None and event.is_printable:
+            event.time = 0
+            event.stop()
+            event.prevent_default()
+
+            # Update the search query and jump to the next option that matches.
+            self._search_query += event.character
+            index = self._find_search_match(self._search_query)
+            if index is not None:
+                self.select(index)
+
+    def check_consume_key(self, key: str, character: str | None = None) -> bool:
+        """Check if the widget may consume the given key."""
+        return (
+            self._type_to_search and character is not None and character.isprintable()
+        )
+
     def select(self, index: int | None) -> None:
         """Move selection.
 
@@ -82,7 +124,39 @@ class SelectOverlay(OptionList):
             index: Index of new selection.
         """
         self.highlighted = index
-        self.scroll_to_highlight(top=True)
+        self.scroll_to_highlight()
+
+    def _find_search_match(self, query: str) -> int | None:
+        """A simple substring search which favors options containing the substring
+        earlier in the prompt.
+
+        Args:
+            query: The substring to search for.
+
+        Returns:
+            The index of the option that matches the query, or `None` if no match is found.
+        """
+        best_match: int | None = None
+        minimum_index: int | None = None
+
+        query = query.lower()
+        for index, option in enumerate(self._options):
+            prompt = option.prompt
+            if isinstance(prompt, Text):
+                lower_prompt = prompt.plain.lower()
+            elif isinstance(prompt, str):
+                lower_prompt = prompt.lower()
+            else:
+                continue
+
+            match_index = lower_prompt.find(query)
+            if match_index != -1 and (
+                minimum_index is None or match_index < minimum_index
+            ):
+                best_match = index
+                minimum_index = match_index
+
+        return best_match
 
     def action_dismiss(self) -> None:
         """Dismiss the overlay."""
@@ -110,22 +184,36 @@ class SelectCurrent(Horizontal):
 
     DEFAULT_CSS = """
     SelectCurrent {
-        border: tall transparent;
-        background: $boost;
-        color: $text;
-        width: 100%;
+        border: tall $border-blurred;
+        color: $foreground;
+        background: $surface;
+        width: 1fr;
         height: auto;
         padding: 0 2;
+        pointer: pointer;
+
+        &.-textual-compact {
+            border: none !important;
+        }
+
+        &:ansi {
+            border: tall $border-blurred;
+            color: ansi_default;
+            background: ansi_default;
+            &:focus {
+                border: tall $border;
+            }
+        }
 
         Static#label {
             width: 1fr;
             height: auto;
-            color: $text-disabled;
+            color: $foreground 50%;
             background: transparent;
         }
 
         &.-has-value Static#label {
-            color: $text;
+            color: $foreground;
         }
 
         .arrow {
@@ -133,11 +221,13 @@ class SelectCurrent(Horizontal):
             width: 1;
             height: 1;
             padding: 0 0 0 1;
-            color: $text-muted;
+            color: $foreground 50%;
             background: transparent;
         }
     }
     """
+
+    ALLOW_SELECT = False
 
     has_value: var[bool] = var(False)
     """True if there is a current value, or False if it is None."""
@@ -153,7 +243,7 @@ class SelectCurrent(Horizontal):
         """
         super().__init__()
         self.placeholder = placeholder
-        self.label: RenderableType | NoSelection = Select.BLANK
+        self.label: RenderableType | NoSelection = Select.NULL
 
     def update(self, label: RenderableType | NoSelection) -> None:
         """Update the content in the widget.
@@ -162,28 +252,28 @@ class SelectCurrent(Horizontal):
             label: A renderable to display, or `None` for the placeholder.
         """
         self.label = label
-        self.has_value = label is not Select.BLANK
+        self.has_value = label is not Select.NULL
         self.query_one("#label", Static).update(
             self.placeholder if isinstance(label, NoSelection) else label
         )
 
     def compose(self) -> ComposeResult:
         """Compose label and down arrow."""
-        yield Static(self.placeholder, id="label")
-        yield Static("▼", classes="arrow down-arrow")
-        yield Static("▲", classes="arrow up-arrow")
+        yield NonSelectableStatic(self.placeholder, id="label")
+        yield NonSelectableStatic("▼", classes="arrow down-arrow")
+        yield NonSelectableStatic("▲", classes="arrow up-arrow")
 
     def _watch_has_value(self, has_value: bool) -> None:
         """Toggle the class."""
         self.set_class(has_value, "-has-value")
 
-    async def _on_click(self, event: events.Click) -> None:
+    def _on_click(self, event: events.Click) -> None:
         """Inform ancestor we want to toggle."""
         event.stop()
         self.post_message(self.Toggle())
 
 
-SelectType = TypeVar("SelectType")
+SelectType = TypeVar("SelectType", bound=Hashable)
 """The type used for data in the Select."""
 SelectOption: TypeAlias = "tuple[str, SelectType]"
 """The type used for options in the Select."""
@@ -196,7 +286,7 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
     When activated with ++enter++ the widget displays an overlay with a list of all possible options.
     """
 
-    BLANK = BLANK
+    NULL = NULL
     """Constant to flag that the widget has no selection."""
 
     BINDINGS = [
@@ -208,9 +298,28 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
     | enter,down,space,up | Activate the overlay |
     """
 
+    ALLOW_SELECT = False
+
     DEFAULT_CSS = """
     Select {
         height: auto;
+        color: $foreground;
+
+        &.-textual-compact {
+            & > SelectCurrent {
+                padding: 0 1 0 0;
+                border: none !important;
+            }            
+        }
+        
+        .up-arrow {
+            display: none;
+        }
+
+        &:focus > SelectCurrent {
+            border: tall $border;
+            background-tint: $foreground 5%;
+        }
 
         & > SelectOverlay {
             width: 1fr;
@@ -218,32 +327,30 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
             height: auto;
             max-height: 12;
             overlay: screen;
-            constrain: y;
+            constrain: none inside;
+            color: $foreground;
+            border: tall $border-blurred;
+            background: $surface;
+            &:focus {
+                background-tint: $foreground 5%;
+            }
+            & > .option-list--option {
+                padding: 0 1;
+            }
         }
 
-        &:focus > SelectCurrent {
-            border: tall $accent;
+        &.-expanded {
+            .down-arrow {
+                display: none;
+            }
+            .up-arrow {
+                display: block;
+            }
+            & > SelectOverlay {
+                display: block;
+            }
         }
 
-        .up-arrow {
-            display: none;
-        }
-
-        &.-expanded .down-arrow {
-            display: none;
-        }
-
-        &.-expanded .up-arrow {
-            display: block;
-        }
-
-        &.-expanded > SelectOverlay {
-            display: block;
-        }
-
-        &.-expanded > SelectCurrent {
-            border: tall $accent;
-        }
     }
 
     """
@@ -252,15 +359,16 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
     """True to show the overlay, otherwise False."""
     prompt: var[str] = var[str]("Select")
     """The prompt to show when no value is selected."""
-    value: var[SelectType | NoSelection] = var[Union[SelectType, NoSelection]](
-        BLANK, init=False
-    )
+    value: var[SelectType | NoSelection] = var(NULL, init=False)
     """The value of the selection.
 
-    If the widget has no selection, its value will be [`Select.BLANK`][textual.widgets.Select.BLANK].
+    If the widget has no selection, its value will be [`Select.NULL`][textual.widgets.Select.NULL].
     Setting this to an illegal value will raise a [`InvalidSelectValueError`][textual.widgets.select.InvalidSelectValueError]
     exception.
     """
+
+    compact = reactive(False, toggle_class="-textual-compact")
+    """Make the select compact (without borders)."""
 
     @rich.repr.auto
     class Changed(Message):
@@ -296,12 +404,14 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         *,
         prompt: str = "Select",
         allow_blank: bool = True,
-        value: SelectType | NoSelection = BLANK,
+        value: SelectType | NoSelection = NULL,
+        type_to_search: bool = True,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
         disabled: bool = False,
         tooltip: RenderableType | None = None,
+        compact: bool = False,
     ):
         """Initialize the Select control.
 
@@ -311,15 +421,17 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
             prompt: Text to show in the control when no option is selected.
             allow_blank: Enables or disables the ability to have the widget in a state
                 with no selection made, in which case its value is set to the constant
-                [`Select.BLANK`][textual.widgets.Select.BLANK].
+                [`Select.NULL`][textual.widgets.Select.NULL].
             value: Initial value selected. Should be one of the values in `options`.
                 If no initial value is set and `allow_blank` is `False`, the widget
                 will auto-select the first available option.
+            type_to_search: If `True`, typing will search for options.
             name: The name of the select control.
             id: The ID of the control in the DOM.
             classes: The CSS classes of the control.
             disabled: Whether the control is disabled or not.
             tooltip: Optional tooltip.
+            compact: Enable compact select (without borders).
 
         Raises:
             EmptySelectError: If no options are provided and `allow_blank` is `False`.
@@ -329,8 +441,10 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         self.prompt = prompt
         self._value = value
         self._setup_variables_for_options(options)
+        self._type_to_search = type_to_search
         if tooltip is not None:
             self.tooltip = tooltip
+        self.compact = compact
 
     @classmethod
     def from_values(
@@ -339,11 +453,13 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         *,
         prompt: str = "Select",
         allow_blank: bool = True,
-        value: SelectType | NoSelection = BLANK,
+        value: SelectType | NoSelection = NULL,
+        type_to_search: bool = True,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
         disabled: bool = False,
+        compact: bool = False,
     ) -> Select[SelectType]:
         """Initialize the Select control with values specified by an arbitrary iterable
 
@@ -355,14 +471,16 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
             prompt: Text to show in the control when no option is selected.
             allow_blank: Enables or disables the ability to have the widget in a state
                 with no selection made, in which case its value is set to the constant
-                [`Select.BLANK`][textual.widgets.Select.BLANK].
+                [`Select.NULL`][textual.widgets.Select.NULL].
             value: Initial value selected. Should be one of the values in `values`.
                 If no initial value is set and `allow_blank` is `False`, the widget
                 will auto-select the first available value.
+            type_to_search: If `True`, typing will search for options.
             name: The name of the select control.
             id: The ID of the control in the DOM.
             classes: The CSS classes of the control.
             disabled: Whether the control is disabled or not.
+            compact: Enable compact style?
 
         Returns:
             A new Select widget with the provided values as options.
@@ -374,11 +492,26 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
             prompt=prompt,
             allow_blank=allow_blank,
             value=value,
+            type_to_search=type_to_search,
             name=name,
             id=id,
             classes=classes,
             disabled=disabled,
+            compact=compact,
         )
+
+    @property
+    def selection(self) -> SelectType | None:
+        """The currently selected item.
+
+        Unlike [value][textual.widgets.Select.value], this will not return Blanks.
+        If nothing is selected, this will return `None`.
+
+        """
+        value = self.value
+        if isinstance(value, NoSelection):
+            return None
+        return value
 
     def _setup_variables_for_options(
         self,
@@ -390,7 +523,7 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         """
         self._options: list[tuple[RenderableType, SelectType | NoSelection]] = []
         if self._allow_blank:
-            self._options.append(("", self.BLANK))
+            self._options.append(("", self.NULL))
         self._options.extend(options)
 
         if not self._options:
@@ -404,10 +537,10 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
 
     def _setup_options_renderables(self) -> None:
         """Sets up the `Option` renderables associated with the `Select` options."""
-        self._select_options: list[Option] = [
+        options: list[Option] = [
             (
                 Option(Text(self.prompt, style="dim"))
-                if value == self.BLANK
+                if value == self.NULL
                 else Option(prompt)
             )
             for prompt, value in self._options
@@ -415,12 +548,11 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
 
         option_list = self.query_one(SelectOverlay)
         option_list.clear_options()
-        for option in self._select_options:
-            option_list.add_option(option)
+        option_list.add_options(options)
 
-    def _init_selected_option(self, hint: SelectType | NoSelection = BLANK) -> None:
+    def _init_selected_option(self, hint: SelectType | NoSelection = NULL) -> None:
         """Initialises the selected option for the `Select`."""
-        if hint == self.BLANK and not self._allow_blank:
+        if hint == self.NULL and not self._allow_blank:
             hint = self._options[0][1]
         self.value = hint
 
@@ -473,8 +605,8 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         except NoMatches:
             pass
         else:
-            if value == self.BLANK:
-                select_current.update(self.BLANK)
+            if value == self.NULL:
+                select_current.update(self.NULL)
             else:
                 for index, (prompt, _value) in enumerate(self._options):
                     if _value == value:
@@ -487,7 +619,9 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
     def compose(self) -> ComposeResult:
         """Compose Select with overlay and current value."""
         yield SelectCurrent(self.prompt)
-        yield SelectOverlay()
+        yield SelectOverlay(type_to_search=self._type_to_search).data_bind(
+            compact=Select.compact
+        )
 
     def _on_mount(self, _event: events.Mount) -> None:
         """Set initial values."""
@@ -503,8 +637,8 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
             return
         self.set_class(expanded, "-expanded")
         if expanded:
-            overlay.focus()
-            if self.value is self.BLANK:
+            overlay.focus(scroll_visible=False)
+            if self.value is self.NULL:
                 overlay.select(None)
                 self.query_one(SelectCurrent).has_value = False
             else:
@@ -538,12 +672,8 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         if value != self.value:
             self.value = value
 
-        async def update_focus() -> None:
-            """Update focus and reset overlay."""
-            self.focus()
-            self.expanded = False
-
-        self.call_after_refresh(update_focus)  # Prevents a little flicker
+        self.focus()
+        self.expanded = False
 
     def action_show_overlay(self) -> None:
         """Show the overlay."""
@@ -561,7 +691,7 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         Returns:
             True if the selection is blank, False otherwise.
         """
-        return self.value == self.BLANK
+        return self.value == self.NULL
 
     def clear(self) -> None:
         """Clear the selection if `allow_blank` is `True`.
@@ -570,7 +700,7 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
             InvalidSelectValueError: If `allow_blank` is set to `False`.
         """
         try:
-            self.value = self.BLANK
+            self.value = self.NULL
         except InvalidSelectValueError:
             raise InvalidSelectValueError(
                 "Can't clear selection if allow_blank is set to False."
@@ -583,7 +713,7 @@ class Select(Generic[SelectType], Vertical, can_focus=True):
         select_current.placeholder = prompt
         if not self._allow_blank:
             return
-        if self.value == self.BLANK:
-            select_current.update(self.BLANK)
+        if self.value == self.NULL:
+            select_current.update(self.NULL)
         option_list = self.query_one(SelectOverlay)
         option_list.replace_option_prompt_at_index(0, Text(prompt, style="dim"))

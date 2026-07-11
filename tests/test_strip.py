@@ -1,4 +1,5 @@
 import pytest
+from rich.console import Console
 from rich.segment import Segment
 from rich.style import Style
 
@@ -98,9 +99,11 @@ def test_simplify():
 
 
 def test_apply_filter():
-    strip = Strip([Segment("foo", Style.parse("red"))])
-    expected = Strip([Segment("foo", Style.parse("#1b1b1b"))])
-    assert strip.apply_filter(Monochrome(), Color(0, 0, 0)) == expected
+    strip = Strip([Segment("foo", Style.parse("#990000"))])
+    expected = Strip([Segment("foo", Style.parse("#212121"))])
+    result = strip.apply_filter(Monochrome(), Color(0, 0, 0))
+    print(repr(result))
+    assert result == expected
 
 
 def test_style_links():
@@ -131,7 +134,7 @@ def test_crop():
 
     assert Strip([Segment("foo")]).crop(1, 3) == Strip([Segment("oo")])
     assert Strip([Segment("foo")]).crop(1, 2) == Strip([Segment("o")])
-    assert Strip([Segment("foo")]).crop(1, 1) == Strip([Segment("")])
+    assert Strip([Segment("foo")]).crop(1, 1) == Strip([])
 
     assert Strip([Segment("foo💩"), Segment("b💩ar"), Segment("ba💩z")]).crop(
         1, 6
@@ -196,3 +199,9 @@ def test_text():
     assert Strip([]).text == ""
     assert Strip([Segment("foo")]).text == "foo"
     assert Strip([Segment("foo"), Segment("bar")]).text == "foobar"
+
+
+def test_render_with_missing_style() -> None:
+    """Test that render with segments that omit a style still work."""
+    strip = Strip([Segment("Hello")])
+    assert strip.render(Console()) == "Hello"

@@ -22,6 +22,7 @@ from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 
 from textual.color import Color
+from textual.constants import DIM_FACTOR
 
 
 class LineFilter(ABC):
@@ -125,7 +126,9 @@ NO_DIM = Style(dim=False)
 
 
 @lru_cache(1024)
-def dim_color(background: RichColor, color: RichColor, factor: float) -> RichColor:
+def dim_color(
+    background: RichColor, color: RichColor, factor: float = DIM_FACTOR
+) -> RichColor:
     """Dim a color by blending towards the background
 
     Args:
@@ -177,13 +180,14 @@ def dim_style(style: Style, background: Color, factor: float) -> Style:
 class DimFilter(LineFilter):
     """Replace dim attributes with modified colors."""
 
-    def __init__(self, dim_factor: float = 0.5) -> None:
+    def __init__(self, dim_factor: float = 0.5, enabled: bool = True) -> None:
         """Initialize the filter.
 
         Args:
             dim_factor: The factor to dim by; 0 is 100% background (i.e. invisible), 1.0 is no change.
         """
         self.dim_factor = dim_factor
+        super().__init__(enabled=enabled)
 
     def apply(self, segments: list[Segment], background: Color) -> list[Segment]:
         """Transform a list of segments.
@@ -198,7 +202,6 @@ class DimFilter(LineFilter):
         _Segment = Segment
         _dim_style = dim_style
         factor = self.dim_factor
-
         return [
             (
                 _Segment(
@@ -226,7 +229,7 @@ class ANSIToTruecolor(LineFilter):
         super().__init__(enabled=enabled)
 
     @lru_cache(1024)
-    def truecolor_style(self, style: Style) -> Style:
+    def truecolor_style(self, style: Style, background: RichColor) -> Style:
         """Replace system colors with truecolor equivalent.
 
         Args:
@@ -236,18 +239,27 @@ class ANSIToTruecolor(LineFilter):
             New style.
         """
         terminal_theme = self._terminal_theme
-        color = style.color
-        if color is not None and color.is_system_defined:
-            color = RichColor.from_rgb(
-                *color.get_truecolor(terminal_theme, foreground=True)
-            )
-        bgcolor = style.bgcolor
-        if bgcolor is not None and bgcolor.is_system_defined:
-            bgcolor = RichColor.from_rgb(
-                *bgcolor.get_truecolor(terminal_theme, foreground=False)
-            )
 
-        return style + Style.from_color(color, bgcolor)
+        changed = False
+        if (color := style.color) is not None:
+            if color.triplet is None:
+                color = RichColor.from_triplet(
+                    color.get_truecolor(terminal_theme, foreground=True)
+                )
+                changed = True
+
+        if (bgcolor := style.bgcolor) is not None and bgcolor.triplet is None:
+            bgcolor = RichColor.from_triplet(
+                bgcolor.get_truecolor(terminal_theme, foreground=False)
+            )
+            changed = True
+
+        if style.dim and color is not None:
+            color = dim_color(background if bgcolor is None else bgcolor, color)
+            style += NO_DIM
+            changed = True
+
+        return style + Style.from_color(color, bgcolor) if changed else style
 
     def apply(self, segments: list[Segment], background: Color) -> list[Segment]:
         """Transform a list of segments.
@@ -261,11 +273,15 @@ class ANSIToTruecolor(LineFilter):
         """
         _Segment = Segment
         truecolor_style = self.truecolor_style
-
+        background_rich_color = background.rich_color
         return [
             _Segment(
                 text,
-                None if style is None else truecolor_style(style),
+                (
+                    None
+                    if style is None
+                    else truecolor_style(style, background_rich_color)
+                ),
                 None,
             )
             for text, style, _ in segments

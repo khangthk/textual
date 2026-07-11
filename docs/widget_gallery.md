@@ -21,7 +21,7 @@ A simple button with a variety of semantic styles.
 
 [Button reference](./widgets/button.md){ .md-button .md-button--primary }
 
-```{.textual path="docs/examples/widgets/button.py"}
+```{.textual path="docs/examples/widgets/button.py" columns="100" lines="24"}
 ```
 
 
@@ -121,6 +121,13 @@ A simple text label.
 [Label reference](./widgets/label.md){ .md-button .md-button--primary }
 
 
+## Link
+
+A clickable link that opens a URL.
+
+[Link reference](./widgets/link.md){ .md-button .md-button--primary }
+
+
 ## ListView
 
 Display a list of items (items may be other widgets).
@@ -155,7 +162,7 @@ Display and interact with a Markdown document (adds a table of contents and brow
 [MarkdownViewer reference](./widgets/markdown_viewer.md){ .md-button .md-button--primary }
 
 
-```{.textual path="docs/examples/widgets/markdown_viewer.py" columns="100" lines="42"}
+```{.textual path="docs/examples/widgets/markdown_viewer.py" columns="120" lines="50" press="tab,down"}
 ```
 
 ## Markdown
@@ -165,7 +172,7 @@ Display a markdown document.
 [Markdown reference](./widgets/markdown.md){ .md-button .md-button--primary }
 
 
-```{.textual path="docs/examples/widgets/markdown.py"}
+```{.textual path="docs/examples/widgets/markdown.py" columns="120" lines="53"}
 ```
 
 ## MaskedInput

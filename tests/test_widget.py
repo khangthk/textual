@@ -1,12 +1,12 @@
 from operator import attrgetter
 
 import pytest
-from rich.text import Text
 
 from textual import events
 from textual._node_list import DuplicateIds
 from textual.app import App, ComposeResult
-from textual.containers import Container
+from textual.containers import Container, Vertical
+from textual.content import Content
 from textual.css.errors import StyleValueError
 from textual.css.query import NoMatches
 from textual.geometry import Offset, Size
@@ -23,6 +23,7 @@ from textual.widgets import (
     Log,
     OptionList,
     RichLog,
+    Static,
     Switch,
     TextArea,
 )
@@ -63,7 +64,7 @@ async def test_widget_construct():
         ["visible", True, "visible"],
     ],
 )
-def test_widget_set_visible_true(set_val, get_val, style_str):
+async def test_widget_set_visible_true(set_val, get_val, style_str):
     widget = Widget()
     widget.visible = set_val
 
@@ -71,7 +72,7 @@ def test_widget_set_visible_true(set_val, get_val, style_str):
     assert widget.styles.visibility == style_str
 
 
-def test_widget_set_visible_invalid_string():
+async def test_widget_set_visible_invalid_string():
     widget = Widget()
 
     with pytest.raises(StyleValueError):
@@ -80,7 +81,7 @@ def test_widget_set_visible_invalid_string():
     assert widget.visible
 
 
-def test_widget_content_width():
+async def test_widget_content_width():
     class TextWidget(Widget):
         def __init__(self, text: str, id: str) -> None:
             self.text = text
@@ -238,19 +239,19 @@ async def test_widget_mount_ids_must_be_unique_mounting_multiple_calls(hierarchy
             parent.mount(widget2)
 
 
-def test_get_pseudo_class_state():
+async def test_get_pseudo_class_state():
     widget = Widget()
     pseudo_classes = widget.get_pseudo_class_state()
     assert pseudo_classes == PseudoClasses(enabled=True, focus=False, hover=False)
 
 
-def test_get_pseudo_class_state_disabled():
+async def test_get_pseudo_class_state_disabled():
     widget = Widget(disabled=True)
     pseudo_classes = widget.get_pseudo_class_state()
     assert pseudo_classes == PseudoClasses(enabled=False, focus=False, hover=False)
 
 
-def test_get_pseudo_class_state_parent_disabled():
+async def test_get_pseudo_class_state_parent_disabled():
     child = Widget()
     _parent = Widget(disabled=True)
     child._attach(_parent)
@@ -258,14 +259,14 @@ def test_get_pseudo_class_state_parent_disabled():
     assert pseudo_classes == PseudoClasses(enabled=False, focus=False, hover=False)
 
 
-def test_get_pseudo_class_state_hover():
+async def test_get_pseudo_class_state_hover():
     widget = Widget()
     widget.mouse_hover = True
     pseudo_classes = widget.get_pseudo_class_state()
     assert pseudo_classes == PseudoClasses(enabled=True, focus=False, hover=True)
 
 
-def test_get_pseudo_class_state_focus():
+async def test_get_pseudo_class_state_focus():
     widget = Widget()
     widget.has_focus = True
     pseudo_classes = widget.get_pseudo_class_state()
@@ -314,13 +315,13 @@ async def test_remove_unmounted():
         assert mounted
 
 
-def test_render_str() -> None:
+async def test_render_str() -> None:
     widget = Label()
-    assert widget.render_str("foo") == Text("foo")
-    assert widget.render_str("[b]foo") == Text.from_markup("[b]foo")
+    assert widget.render_str("foo") == Content("foo")
+    assert widget.render_str("[b]foo") == Content.from_markup("[b]foo")
     # Text objects are passed unchanged
-    text = Text("bar")
-    assert widget.render_str(text) is text
+    content = Content("bar")
+    assert widget.render_str(content) is content
 
 
 async def test_compose_order() -> None:
@@ -341,7 +342,7 @@ async def test_compose_order() -> None:
     class SelectBugApp(App[None]):
         async def on_mount(self):
             await self.push_screen(MyScreen(id="my-screen"))
-            self.query_one(Select)
+            self.screen.query_one(Select)
 
     app = SelectBugApp()
     messages: list[Message] = []
@@ -371,11 +372,11 @@ def test_children_must_be_widgets():
         Widget(1, 2, 3)
 
 
-def test_orphan_widget_has_no_siblings():
+async def test_orphan_widget_has_no_siblings():
     assert Widget().siblings == []
 
 
-def test__allow_scroll_default():
+async def test__allow_scroll_default():
     assert not Widget()._allow_scroll
 
 
@@ -407,7 +408,7 @@ async def test_offset_getter_setter():
         assert label.offset == Offset(7, 3)
 
 
-def test_get_set_tooltip():
+async def test_get_set_tooltip():
     widget = Widget()
     assert widget.tooltip is None
     widget.tooltip = "This is a tooltip."
@@ -442,6 +443,45 @@ async def test_loading():
         label.loading = False  # Setting to same value is a null-op
         await pilot.pause()
         assert label._cover_widget is None
+
+
+async def test_loading_button():
+    """Test loading indicator renders buttons unclickable."""
+
+    counter = 0
+
+    class LoadingApp(App):
+        def compose(self) -> ComposeResult:
+            yield Button("Hello, World", action="app.inc")
+
+        def action_inc(self) -> None:
+            nonlocal counter
+            counter += 1
+
+    async with LoadingApp().run_test() as pilot:
+        # Sanity check
+        assert counter == 0
+
+        button = pilot.app.query_one(Button)
+        button.active_effect_duration = 0
+
+        # Click the button to advance the counter
+        await pilot.click(button)
+        assert counter == 1
+
+        # Set the button to loading state
+        button.loading = True
+
+        # A click should do nothing
+        await pilot.click(button)
+        assert counter == 1
+
+        # Set the button to not loading
+        button.loading = False
+
+        # Click should advance counter
+        await pilot.click(button)
+        assert counter == 2
 
 
 async def test_is_mounted_property():
@@ -492,7 +532,7 @@ async def test_render_returns_text():
 
     widget = SimpleWidget()
     render_result = widget._render()
-    assert isinstance(render_result, Text)
+    assert isinstance(render_result, Content)
     assert render_result.plain == "Hello World!"
 
 
@@ -594,3 +634,135 @@ def test_lazy_loading() -> None:
     assert not hasattr(widgets, "foo")
     assert not hasattr(widgets, "bar")
     assert hasattr(widgets, "Label")
+
+
+async def test_of_type() -> None:
+    class MyApp(App):
+        def compose(self) -> ComposeResult:
+            for ordinal in range(5):
+                yield Label(f"Item {ordinal}")
+
+    app = MyApp()
+    async with app.run_test():
+        labels = list(app.query(Label))
+        assert labels[0].first_of_type
+        assert not labels[0].last_of_type
+        assert labels[0].first_child
+        assert not labels[0].last_child
+        assert labels[0].is_odd
+        assert not labels[0].is_even
+
+        assert not labels[1].first_of_type
+        assert not labels[1].last_of_type
+        assert not labels[1].first_child
+        assert not labels[1].last_child
+        assert not labels[1].is_odd
+        assert labels[1].is_even
+
+        assert not labels[2].first_of_type
+        assert not labels[2].last_of_type
+        assert not labels[2].first_child
+        assert not labels[2].last_child
+        assert labels[2].is_odd
+        assert not labels[2].is_even
+
+        assert not labels[3].first_of_type
+        assert not labels[3].last_of_type
+        assert not labels[3].first_child
+        assert not labels[3].last_child
+        assert not labels[3].is_odd
+        assert labels[3].is_even
+
+        assert not labels[4].first_of_type
+        assert labels[4].last_of_type
+        assert not labels[4].first_child
+        assert labels[4].last_child
+        assert labels[4].is_odd
+        assert not labels[4].is_even
+
+
+async def test_click_line_api_border():
+    """Regression test for https://github.com/Textualize/textual/issues/5634"""
+
+    class MyApp(App):
+        def compose(self) -> ComposeResult:
+            self.my_log = Log()
+            self.my_log.styles.border = ("round", "white")
+            yield self.my_log
+
+    app = MyApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.click("Log", (10, 0))
+
+
+async def test_get_common_ancestor():
+    """Test the Widget.get_common_ancestor classmethod"""
+
+    class AncestorApp(App):
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="v1"):
+                with Vertical(id="v2"):
+                    yield Label(id="label1")
+                with Vertical(id="v3"):
+                    with Vertical(id="v4"):
+                        yield Label(id="label2")
+                        yield Label(id="label3")
+
+    app = AncestorApp()
+    async with app.run_test():
+        label1 = app.query_one("#label1")
+        label2 = app.query_one("#label2")
+        label3 = app.query_one("#label3")
+
+        # Successful operations
+        assert Widget.get_common_ancestor(label2, label3).id == "v4"
+        assert Widget.get_common_ancestor(label2, label1).id == "v1"
+
+        with pytest.raises(ValueError):
+            # No common ancestor, throws a Value Error
+            Widget.get_common_ancestor(label1, Label("unattached"))
+
+        # No common ancestor with default
+        assert (
+            Widget.get_common_ancestor(label1, Label("unattached"), default=app.screen)
+            is app.screen
+        )
+
+
+async def test_select_remove():
+    """Test selecting text after a widget is removed.
+
+    Regression test for https://github.com/Textualize/textual/issues/6452
+
+    """
+
+    top_text = "Hello, World " * 20
+    vanish_text = "This will vanish " * 10
+
+    class SelApp(App):
+
+        BINDINGS = [("space", "vanish")]
+
+        def compose(self) -> ComposeResult:
+            yield Static(top_text)
+            yield Static(vanish_text, id="vanish")
+
+        def action_vanish(self) -> None:
+            self.query_one("#vanish").remove()
+
+    app = SelApp()
+    # Simulate mouse down, move to second widget, remove second widget, move mouse, mouse up
+    # Prior to the fix this would result in an error as the second widget was no longer attached
+    # Post fix, there should be no error, and the selected text should be from the first widget.
+    async with app.run_test() as pilot:
+        await pilot.mouse_down(offset=(5, 2))
+        await pilot.hover(offset=(20, 5))
+        await app.query_one("#vanish").remove()
+        await pilot.hover(offset=(25, 6))
+        await pilot.mouse_up(offset=(30, 5))
+        selected_text = app.screen.get_selected_text()
+        expected = ", World Hello, World Hello, World Hello, World Hello, World Hello, World Hello, World Hello, World "
+        print(repr(selected_text))
+        assert selected_text == expected

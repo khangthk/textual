@@ -1,8 +1,10 @@
 from string import punctuation
+from typing import Type
 
 import pytest
 
 from textual import events, work
+from textual._on import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Middle
@@ -124,7 +126,7 @@ async def test_pilot_click_screen():
     Check we can use `Screen` as a selector for a click."""
 
     async with App().run_test() as pilot:
-        await pilot.click("Screen")
+        await pilot.click()
 
 
 async def test_pilot_hover_screen():
@@ -133,7 +135,7 @@ async def test_pilot_hover_screen():
     Check we can use `Screen` as a selector for a hover."""
 
     async with App().run_test() as pilot:
-        await pilot.hover("Screen")
+        await pilot.hover()
 
 
 @pytest.mark.parametrize(
@@ -306,7 +308,7 @@ async def test_pilot_target_on_widget_that_is_not_visible_errors(method, target)
     """Make sure that clicking a widget that is not scrolled into view raises an error."""
     app = ManyLabelsApp()
     async with app.run_test(size=(80, 5)) as pilot:
-        app.query_one("#label50").scroll_visible(animate=False)
+        app.query_one("#label50").scroll_visible(immediate=True, animate=False)
         await pilot.pause()
 
         pilot_method = getattr(pilot, method)
@@ -407,3 +409,44 @@ async def test_fail_early():
     with pytest.raises(StylesheetError):
         async with app.run_test() as pilot:
             await pilot.press("enter")
+
+
+async def test_click_by_widget():
+    """Test that click accept a Widget instance."""
+    pressed = False
+
+    class TestApp(CenteredButtonApp):
+        def on_button_pressed(self):
+            nonlocal pressed
+            pressed = True
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        button = app.query_one(Button)
+        assert not pressed
+        await pilot.click(button)
+        assert pressed
+
+
+@pytest.mark.parametrize("times", [1, 2, 3])
+async def test_click_times(times: int):
+    """Test that Pilot.click() can be called with a `times` argument."""
+
+    events_received: list[Type[events.Event]] = []
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Label("Click counter")
+
+        @on(events.Click)
+        @on(events.MouseDown)
+        @on(events.MouseUp)
+        def on_label_clicked(self, event: events.Event):
+            events_received.append(event.__class__)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.click(Label, times=times)
+        assert (
+            events_received == [events.MouseDown, events.MouseUp, events.Click] * times
+        )

@@ -5,7 +5,7 @@ from collections import defaultdict
 from itertools import chain
 from operator import itemgetter
 from pathlib import Path, PurePath
-from typing import Iterable, NamedTuple, Sequence, cast
+from typing import Final, Iterable, NamedTuple, Sequence, cast
 
 import rich.repr
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
@@ -24,6 +24,8 @@ from textual.css.tokenize import Token, tokenize_values
 from textual.css.tokenizer import TokenError
 from textual.css.types import CSSLocation, Specificity3, Specificity6
 from textual.dom import DOMNode
+from textual.markup import parse_style
+from textual.style import Style
 from textual.widget import Widget
 
 _DEFAULT_STYLES = Styles()
@@ -149,6 +151,7 @@ class Stylesheet:
         self._require_parse = False
         self._invalid_css: set[str] = set()
         self._parse_cache: LRUCache[tuple, list[RuleSet]] = LRUCache(64)
+        self._style_parse_cache: LRUCache[str, Style] = LRUCache(1024 * 4)
 
     def __rich_repr__(self) -> rich.repr.Result:
         yield list(self.source.keys())
@@ -215,6 +218,24 @@ class Stylesheet:
         self.__variable_tokens = None
         self._invalid_css = set()
         self._parse_cache.clear()
+        self._style_parse_cache.clear()
+
+    def parse_style(self, style_text: str | Style) -> Style:
+        """Parse a (visual) Style.
+
+        Args:
+            style_text: Visual style, such as "bold white 90% on $primary"
+
+        Returns:
+            New Style instance.
+        """
+        if isinstance(style_text, Style):
+            return style_text
+        if style_text in self._style_parse_cache:
+            return self._style_parse_cache[style_text]
+        style = parse_style(style_text)
+        self._style_parse_cache[style_text] = style
+        return style
 
     def _parse_rules(
         self,
@@ -255,6 +276,7 @@ class Stylesheet:
                     tie_breaker=tie_breaker,
                 )
             )
+
         except TokenError:
             raise
         except Exception as error:
@@ -275,7 +297,7 @@ class Stylesheet:
         """
         filename = os.path.expanduser(filename)
         try:
-            with open(filename, "rt") as css_file:
+            with open(filename, "rt", encoding="utf-8") as css_file:
                 css = css_file.read()
             path = os.path.abspath(filename)
         except Exception:
@@ -432,6 +454,19 @@ class Stylesheet:
             if _check_selectors(selector_set.selectors, css_path_nodes):
                 yield selector_set.specificity
 
+    # pseudo classes which iterate over multiple nodes
+    # These shouldn't be used in a cache key
+    _EXCLUDE_PSEUDO_CLASSES_FROM_CACHE: Final[set[str]] = {
+        "first-of-type",
+        "last-of-type",
+        "first-child",
+        "last-child",
+        "odd",
+        "even",
+        "focus-within",
+        "empty",
+    }
+
     def apply(
         self,
         node: DOMNode,
@@ -467,14 +502,21 @@ class Stylesheet:
             for rule in rules_map[name]
         }
         rules = list(filter(limit_rules.__contains__, reversed(self.rules)))
-
-        node._has_hover_style = any("hover" in rule.pseudo_classes for rule in rules)
-        node._has_focus_within = any(
-            "focus-within" in rule.pseudo_classes for rule in rules
+        all_pseudo_classes = set().union(*[rule.pseudo_classes for rule in rules])
+        node._has_hover_style = "hover" in all_pseudo_classes
+        node._has_focus_within = "focus-within" in all_pseudo_classes
+        node._has_order_style = not all_pseudo_classes.isdisjoint(
+            {"first-of-type", "last-of-type", "first-child", "last-child", "empty"}
+        )
+        node._has_odd_or_even = (
+            "odd" in all_pseudo_classes or "even" in all_pseudo_classes
         )
 
-        cache_key: tuple | None
-        if cache is not None:
+        cache_key: tuple | None = None
+
+        if cache is not None and all_pseudo_classes.isdisjoint(
+            self._EXCLUDE_PSEUDO_CLASSES_FROM_CACHE
+        ):
             cache_key = (
                 node._parent,
                 (
@@ -483,7 +525,7 @@ class Stylesheet:
                     else (node._id if f"#{node._id}" in rules_map else None)
                 ),
                 node.classes,
-                node.pseudo_classes,
+                node._pseudo_classes_cache_key,
                 node._css_type_name,
             )
             cached_result: RulesMap | None = cache.get(cache_key)
@@ -491,8 +533,6 @@ class Stylesheet:
                 self.replace_rules(node, cached_result, animate=animate)
                 self._process_component_classes(node)
                 return
-        else:
-            cache_key = None
 
         _check_rule = self._check_rule
         css_path_nodes = node.css_path_nodes
@@ -561,8 +601,7 @@ class Stylesheet:
                         rule_value = getattr(_DEFAULT_STYLES, initial_rule_name)
                     node_rules[initial_rule_name] = rule_value  # type: ignore[literal-required]
 
-            if cache is not None:
-                assert cache_key is not None
+            if cache_key is not None:
                 cache[cache_key] = node_rules
             self.replace_rules(node, node_rules, animate=animate)
         self._process_component_classes(node)
@@ -659,7 +698,6 @@ class Stylesheet:
 
             for key in modified_rule_keys:
                 setattr(base_styles, key, get_rule(key))
-
         node.notify_style_update()
 
     def update(self, root: DOMNode, animate: bool = False) -> None:
@@ -685,9 +723,15 @@ class Stylesheet:
         for node in nodes:
             apply(node, animate=animate, cache=cache)
             if isinstance(node, Widget) and node.is_scrollable:
-                if node.show_vertical_scrollbar:
+                show_vertical_scrollbar = (
+                    node.show_vertical_scrollbar and node.scrollbar_size_vertical
+                )
+                show_horizontal_scrollbar = (
+                    node.show_horizontal_scrollbar and node.scrollbar_size_horizontal
+                )
+                if show_vertical_scrollbar:
                     apply(node.vertical_scrollbar, cache=cache)
-                if node.show_horizontal_scrollbar:
+                if show_horizontal_scrollbar:
                     apply(node.horizontal_scrollbar, cache=cache)
-                if node.show_horizontal_scrollbar and node.show_vertical_scrollbar:
+                if show_horizontal_scrollbar and show_vertical_scrollbar:
                     apply(node.scrollbar_corner, cache=cache)

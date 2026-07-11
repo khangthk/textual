@@ -68,7 +68,7 @@ This will prevent the user from typing any more characters when the maximum has 
 You can supply one or more *[validators][textual.validation.Validator]* to the `Input` widget to validate the value.
 
 All the supplied validators will run when the value changes, the `Input` is submitted, or focus moves _out_ of the `Input`.
-The values `"changed"`, `"submitted"`, and `"blur"`, can be passed as an iterable to the `Input` parameter `validate_on` to request that validation occur only on the respective mesages.
+The values `"changed"`, `"submitted"`, and `"blur"`, can be passed as an iterable to the `Input` parameter `validate_on` to request that validation occur only on the respective messages.
 (See [`InputValidationOn`][textual.widgets._input.InputValidationOn] and [`Input.validate_on`][textual.widgets.Input.validate_on].)
 For example, the code below creates an `Input` widget that only gets validated when the value is submitted explicitly:
 
@@ -78,8 +78,7 @@ input = Input(validate_on=["submitted"])
 
 Validation is considered to have failed if *any* of the validators fail.
 
-You can check whether the validation succeeded or failed inside an [Input.Changed][textual.widgets.Input.Changed] or
-[Input.Submitted][textual.widgets.Input.Submitted] handler by looking at the `validation_result` attribute on these events.
+You can check whether the validation succeeded or failed inside an [Input.Changed][textual.widgets.Input.Changed], [Input.Submitted][textual.widgets.Input.Submitted], or [Input.Blurred][textual.widgets.Input.Blurred] handler by looking at the `validation_result` attribute on these events.
 
 In the example below, we show how to combine multiple validators and update the UI to tell the user
 why validation failed.
@@ -132,6 +131,7 @@ If you set `valid_empty=True` then empty values will bypass any validators, and 
 
 ## Messages
 
+- [Input.Blurred][textual.widgets.Input.Blurred]
 - [Input.Changed][textual.widgets.Input.Changed]
 - [Input.Submitted][textual.widgets.Input.Submitted]
 

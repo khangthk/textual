@@ -270,6 +270,9 @@ KEY_DISPLAY_ALIASES = {
 }
 
 
+ASCII_KEY_NAMES = {"\t": "tab"}
+
+
 def _get_unicode_name_from_key(key: str) -> str:
     """Get the best guess for the Unicode name of the char corresponding to the key.
 
@@ -341,8 +344,25 @@ def _character_to_key(character: str) -> str:
     This transformation can be undone by the function `_get_unicode_name_from_key`.
     """
     if not character.isalnum():
-        key = unicodedata.name(character).lower().replace("-", "_").replace(" ", "_")
+        try:
+            key = (
+                unicodedata.name(character).lower().replace("-", "_").replace(" ", "_")
+            )
+        except ValueError:
+            key = ASCII_KEY_NAMES.get(character, character)
     else:
         key = character
     key = KEY_NAME_REPLACEMENTS.get(key, key)
     return key
+
+
+def _normalize_key_list(keys: str) -> str:
+    """Normalizes a comma separated list of keys.
+
+    Replaces single letter keys with full name.
+    """
+
+    keys_list = [key.strip() for key in keys.split(",")]
+    return ",".join(
+        _character_to_key(key) if len(key) == 1 else key for key in keys_list
+    )

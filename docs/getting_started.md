@@ -1,22 +1,26 @@
+
 All you need to get started building Textual apps.
 
 ## Requirements
 
-Textual requires Python 3.8 or later (if you have a choice, pick the most recent Python). Textual runs on Linux, macOS, Windows and probably any OS where Python also runs.
+Textual requires Python 3.9 or later (if you have a choice, pick the most recent Python). Textual runs on Linux, macOS, Windows and probably any OS where Python also runs. 
 
-!!! info inline end "Your platform"
+!!! info "Your platform"
 
     ### :fontawesome-brands-linux: Linux (all distros)
 
     All Linux distros come with a terminal emulator that can run Textual apps.
 
+    If you are using the Linux console (rather than a desktop environment), see [Linux console]](./linux-console.md) for details. 
+
     ### :material-apple: macOS
 
-    The default terminal app is limited to 256 colors. We recommend installing a newer terminal such as [iterm2](https://iterm2.com/), [Kitty](https://sw.kovidgoyal.net/kitty/), or [WezTerm](https://wezfurlong.org/wezterm/).
+    The default terminal app is limited to 256 colors. We recommend installing a newer terminal such as [iterm2](https://iterm2.com/), [Ghostty](https://ghostty.org/), [Kitty](https://sw.kovidgoyal.net/kitty/), or [WezTerm](https://wezfurlong.org/wezterm/).
 
     ### :material-microsoft-windows: Windows
 
     The new [Windows Terminal](https://apps.microsoft.com/store/detail/windows-terminal/9N0DX20HK701?hl=en-gb&gl=GB) runs Textual apps beautifully.
+
 
 ## Installation
 
@@ -34,6 +38,12 @@ If you plan on developing Textual apps, you should also install textual develope
 
 ```
 pip install textual-dev
+```
+
+If you would like to enable syntax highlighting in the [TextArea](./widgets/text_area.md) widget, you should specify the "syntax" extras when you install Textual:
+
+```
+pip install "textual[syntax]"
 ```
 
 ### From conda-forge
@@ -66,11 +76,6 @@ Once you have Textual installed, run the following to get an impression of what 
 
 ```bash
 python -m textual
-```
-
-If Textual is installed you should see the following:
-
-```{.textual path="src/textual/demo.py" columns="127" lines="53" press="enter,tab,w,i,l,l"}
 ```
 
 ## Examples

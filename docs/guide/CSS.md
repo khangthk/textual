@@ -100,7 +100,7 @@ With a header and a footer widget the DOM looks like this:
 --8<-- "docs/images/dom2.excalidraw.svg"
 </div>
 
-!!! note
+!!! note "What we didn't show"
 
     We've simplified the above example somewhat. Both the Header and Footer widgets contain children of their own. When building an app with pre-built widgets you rarely need to know how they are constructed unless you plan on changing the styles of individual components.
 
@@ -108,17 +108,17 @@ Both Header and Footer are children of the Screen object.
 
 To further explore the DOM, we're going to build a simple dialog with a question and two buttons. To do this we're going to import and use a few more builtin widgets:
 
-- `textual.layout.Container` For our top-level dialog.
-- `textual.layout.Horizontal` To arrange widgets left to right.
-- `textual.widgets.Static` For simple content.
-- `textual.widgets.Button` For a clickable button.
+- [`textual.containers.Container`][textual.containers.Container] For our top-level dialog.
+- [`textual.containers.Horizontal`][textual.containers.Horizontal] To arrange widgets left to right.
+- [`textual.widgets.Static`][textual.widgets.Static] For simple content.
+- [`textual.widgets.Button`][textual.widgets.Button] For a clickable button.
 
 
 ```python hl_lines="12 13 14 15 16 17 18 19 20" title="dom3.py"
 --8<-- "docs/examples/guide/dom3.py"
 ```
 
-We've added a Container to our DOM which (as the name suggests) is a container for other widgets. The container has a number of other widgets passed as positional arguments which will be added as the children of the container. Not all widgets accept child widgets in this way. A Button widget doesn't require any children, for example.
+We've added a Container to our DOM which (as the name suggests) contains other widgets. The container has a number of other widgets passed as positional arguments which will be added as the children of the container. Not all widgets accept child widgets in this way. A Button widget doesn't require any children, for example.
 
 Here's the DOM created by the above code:
 
@@ -139,7 +139,7 @@ You may recognize some elements in the above screenshot, but it doesn't quite lo
 To add a stylesheet set the `CSS_PATH` classvar to a relative path:
 
 
-!!! note
+!!! note "What are TCSS files?"
 
     Textual CSS files are typically given the extension `.tcss` to differentiate them from browser CSS (`.css`).
 
@@ -219,18 +219,18 @@ Consequently, a `Static` selector will also style the button because the `Alert`
 ```css
 Static {
   background: blue;
-  border: rounded green;
+  border: round green;
 }
 ```
 
-!!! note
+!!! note "This is different to browser CSS"
 
     The fact that the type selector matches base classes is a departure from browser CSS which doesn't have the same concept.
 
 You may have noticed that the `border` rule exists in both `Static` and `Alert`.
 When this happens, Textual will use the most recently defined sub-class.
 So `Alert` wins over `Static`, and `Static` wins over `Widget` (the base class of all widgets).
-Hence if both rules were in a stylesheet, `Alert` widgets would have a "solid red" border and not a "rounded green" border.
+Hence if both rules were in a stylesheet, `Alert` widgets would have a "solid red" border and not a "round green" border.
 
 ### ID selector
 
@@ -297,6 +297,7 @@ Unlike the `id` attribute, a widget's classes can be changed after the widget wa
 - [remove_class()][textual.dom.DOMNode.remove_class] Removes class name(s) from a widget.
 - [toggle_class()][textual.dom.DOMNode.toggle_class] Removes a class name if it is present, or adds the name if it's not already present.
 - [has_class()][textual.dom.DOMNode.has_class] Checks if one or more classes are set on a widget.
+- [set_class()][textual.css.query.DOMQuery.set_class] Sets or removes a class dependant on a boolean.
 - [classes][textual.dom.DOMNode.classes] Is a frozen set of the class(es) set on a widget.
 
 
@@ -311,6 +312,18 @@ For example, the following will draw a red outline around all widgets:
   outline: solid red;
 }
 ```
+
+While it is rare to need to style all widgets, you can combine the universal selector with a parent, to select all children of that parent.
+
+For instance, here's how we would make all children of a `VerticalScroll` have a red background:
+
+```css
+VerticalScroll * {
+  background: red;
+}
+```
+
+See [Combinators](#combinators) for more details on combining selectors like this.
 
 ### Pseudo classes
 
@@ -327,13 +340,20 @@ The `background: green` is only applied to the Button underneath the mouse curso
 Here are some other pseudo classes:
 
 - `:blur` Matches widgets which *do not* have input focus.
-- `:dark` Matches widgets in dark mode (where `App.dark == True`).
+- `:dark` Matches widgets in dark themes (where `App.theme.dark == True`).
 - `:disabled` Matches widgets which are in a disabled state.
+- `:empty` Matches widgets which have no displayed children.
 - `:enabled` Matches widgets which are in an enabled state.
+- `:even` Matches a widget at an evenly numbered position within its siblings.
+- `:first-child` Matches a widget that is the first amongst its siblings.
+- `:first-of-type` Matches a widget that is the first of its type amongst its siblings.
 - `:focus-within` Matches widgets with a focused child widget.
 - `:focus` Matches widgets which have input focus.
 - `:inline` Matches widgets when the app is running in inline mode.
-- `:light` Matches widgets in dark mode (where `App.dark == False`).
+- `:last-child` Matches a widget that is the last amongst its siblings.
+- `:last-of-type` Matches a widget that is the last of its type amongst its siblings.
+- `:light` Matches widgets in light themes (where `App.theme.dark == False`).
+- `:odd` Matches a widget at an oddly numbered position within its siblings.
 
 ## Combinators
 
@@ -399,7 +419,7 @@ It is possible that several selectors match a given widget. If the same style is
 
 The specificity rules are usually enough to fix any conflicts in your stylesheets. There is one last way of resolving conflicting selectors which applies to individual rules. If you add the text `!important` to the end of a rule then it will "win" regardless of the specificity.
 
-!!! warning
+!!! warning "If everything is Important, nothing is Important"
 
     Use `!important` sparingly (if at all) as it can make it difficult to modify your CSS in the future.
 
@@ -441,7 +461,7 @@ This will be translated into:
 Variables allow us to define reusable styling in a single place.
 If we decide we want to change some aspect of our design in the future, we only have to update a single variable.
 
-!!! note
+!!! note "Where can variables be used?"
 
     Variables can only be used in the _values_ of a CSS declaration. You cannot, for example, refer to a variable inside a selector.
 
@@ -571,4 +591,7 @@ If we were to add other selectors for additional screens or widgets, it would be
 
 ### Why use nesting?
 
-There is no requirement to use nested CSS, but it can help to group related rule sets together (which makes it easier to edit). Nested CSS can also help you avoid some repetition in your selectors, i.e. in the nested CSS we only need to type `#questions` once, rather than four times in the non-nested CSS.
+There is no requirement to use nested CSS, but grouping related rules together avoids repetition (in the nested CSS we only need to type `#questions` once, rather than four times in the non-nested CSS).
+
+Nesting CSS will also make rules that are *more* specific.
+This is useful if you find your rules are applying to widgets that you didn't intend.

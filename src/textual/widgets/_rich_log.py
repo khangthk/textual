@@ -50,8 +50,11 @@ class RichLog(ScrollView, can_focus=True):
     DEFAULT_CSS = """
     RichLog{
         background: $surface;
-        color: $text;
+        color: $foreground;
         overflow-y: scroll;
+        &:focus {
+            background-tint: $foreground 5%;
+        }
     }
     """
 
@@ -123,6 +126,7 @@ class RichLog(ScrollView, can_focus=True):
         indicating we can proceed with rendering deferred writes."""
 
     def notify_style_update(self) -> None:
+        super().notify_style_update()
         self._line_cache.clear()
 
     def on_resize(self, event: Resize) -> None:
@@ -133,6 +137,12 @@ class RichLog(ScrollView, can_focus=True):
             while deferred_renders:
                 deferred_render = deferred_renders.popleft()
                 self.write(*deferred_render)
+
+    def get_content_width(self, container: Size, viewport: Size) -> int:
+        if self._size_known:
+            return self.virtual_size.width
+        else:
+            return container.width
 
     def _make_renderable(self, content: RenderableType | object) -> RenderableType:
         """Make content renderable.
@@ -169,6 +179,7 @@ class RichLog(ScrollView, can_focus=True):
         expand: bool = False,
         shrink: bool = True,
         scroll_end: bool | None = None,
+        animate: bool = False,
     ) -> Self:
         """Write a string or a Rich renderable to the bottom of the log.
 
@@ -186,6 +197,7 @@ class RichLog(ScrollView, can_focus=True):
             shrink: Permit shrinking of content to fit within the content region of the RichLog.
                 If `width` is specified, then `shrink` will be ignored.
             scroll_end: Enable automatic scroll to end, or `None` to use `self.auto_scroll`.
+            animate: Enable animation if the log will scroll.
 
         Returns:
             The `RichLog` instance.
@@ -267,7 +279,7 @@ class RichLog(ScrollView, can_focus=True):
         self.virtual_size = Size(self._widest_line_width, len(self.lines))
 
         if auto_scroll:
-            self.scroll_end(animate=False)
+            self.scroll_end(animate=animate, immediate=False, x_axis=False)
 
         return self
 

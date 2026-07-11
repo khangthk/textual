@@ -6,12 +6,12 @@ from itertools import zip_longest
 from typing import Awaitable
 
 from rich.repr import Result
-from rich.text import Text, TextType
 from typing_extensions import Final
 
 from textual import events
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
+from textual.content import ContentText, ContentType
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
@@ -60,7 +60,9 @@ class ContentTab(Tab):
             else content_id
         )
 
-    def __init__(self, label: Text, content_id: str, disabled: bool = False) -> None:
+    def __init__(
+        self, label: ContentType, content_id: str, disabled: bool = False
+    ) -> None:
         """Initialize a ContentTab.
 
         Args:
@@ -76,7 +78,7 @@ class ContentTabs(Tabs):
 
     def __init__(
         self,
-        *tabs: Tab | TextType,
+        *tabs: Tab | ContentText,
         active: str | None = None,
         tabbed_content: TabbedContent,
     ):
@@ -169,7 +171,6 @@ class TabPane(Widget):
     DEFAULT_CSS = """
     TabPane {
         height: auto;
-        padding: 1 2;
     }
     """
 
@@ -203,7 +204,7 @@ class TabPane(Widget):
 
     def __init__(
         self,
-        title: TextType,
+        title: ContentType,
         *children: Widget,
         name: str | None = None,
         id: str | None = None,
@@ -237,6 +238,7 @@ class TabPane(Widget):
 class TabbedContent(Widget):
     """A container with associated tabs to toggle content visibility."""
 
+    ALLOW_MAXIMIZE = True
     DEFAULT_CSS = """
     TabbedContent {
         height: auto;
@@ -312,7 +314,7 @@ class TabbedContent(Widget):
 
     def __init__(
         self,
-        *titles: TextType,
+        *titles: ContentType,
         initial: str = "",
         name: str | None = None,
         id: str | None = None,
@@ -332,6 +334,7 @@ class TabbedContent(Widget):
         self.titles = [self.render_str(title) for title in titles]
         self._tab_content: list[Widget] = []
         self._initial = initial
+        self._tab_counter = 0
         super().__init__(name=name, id=id, classes=classes, disabled=disabled)
 
     @property
@@ -357,6 +360,15 @@ class TabbedContent(Widget):
             content.id = f"tab-{new_id}"
         return content
 
+    def _generate_tab_id(self) -> int:
+        """Auto generate a new tab id.
+
+        Returns:
+            An auto-incrementing integer.
+        """
+        self._tab_counter += 1
+        return self._tab_counter
+
     def compose(self) -> ComposeResult:
         """Compose the tabbed content."""
 
@@ -368,7 +380,7 @@ class TabbedContent(Widget):
                     if isinstance(content, TabPane)
                     else TabPane(title or self.render_str(f"Tab {index}"), content)
                 ),
-                index,
+                self._generate_tab_id(),
             )
             for index, (title, content) in enumerate(
                 zip_longest(self.titles, self._tab_content), 1
@@ -424,7 +436,7 @@ class TabbedContent(Widget):
         if isinstance(after, TabPane):
             after = after.id
         tabs = self.get_child_by_type(ContentTabs)
-        pane = self._set_id(pane, tabs.tab_count + 1)
+        pane = self._set_id(pane, self._generate_tab_id())
         assert pane.id is not None
         pane.display = False
         return AwaitComplete(

@@ -57,7 +57,7 @@ from textual.geometry import NULL_SPACING, Spacing, SpacingDimensions, clamp
 
 if TYPE_CHECKING:
     from textual.canvas import CanvasLineType
-    from textual._layout import Layout
+    from textual.layout import Layout
     from textual.css.styles import StylesBase
 
 from textual.css.types import AlignHorizontal, AlignVertical, DockEdge, EdgeType
@@ -68,6 +68,7 @@ BorderDefinition: TypeAlias = (
 
 PropertyGetType = TypeVar("PropertyGetType")
 PropertySetType = TypeVar("PropertySetType")
+EnumType = TypeVar("EnumType", covariant=True)
 
 
 class GenericProperty(Generic[PropertyGetType, PropertySetType]):
@@ -125,7 +126,7 @@ class IntegerProperty(GenericProperty[int, int]):
         if isinstance(value, (int, float)):
             return int(value)
         else:
-            raise StyleValueError(f"Expected a number here, got f{value}")
+            raise StyleValueError(f"Expected a number here, got {value!r}")
 
 
 class BooleanProperty(GenericProperty[bool, bool]):
@@ -298,7 +299,7 @@ class BoxProperty:
 
         Returns:
             A ``tuple[EdgeType, Style]`` containing the string type of the box and
-                its style. Example types are "rounded", "solid", and "dashed".
+                its style. Example types are "round", "solid", and "dashed".
         """
         return obj.get_rule(self.name) or ("", self._default_color)  # type: ignore[return-value]
 
@@ -666,8 +667,9 @@ class LayoutProperty:
         Args:
             obj: The Styles object.
             objtype: The Styles class.
+
         Returns:
-            The ``Layout`` object.
+            The `Layout` object.
         """
         return obj.get_rule(self.name)  # type: ignore[return-value]
 
@@ -676,7 +678,7 @@ class LayoutProperty:
         Args:
             obj: The Styles object.
             layout: The layout to use. You can supply the name of the layout
-                or a ``Layout`` object.
+                or a `Layout` object.
         """
 
         from textual.layouts.factory import Layout  # Prevents circular import
@@ -686,19 +688,23 @@ class LayoutProperty:
         if layout is None:
             if obj.clear_rule("layout"):
                 obj.refresh(layout=True, children=True)
-        elif isinstance(layout, Layout):
-            if obj.set_rule("layout", layout):
-                obj.refresh(layout=True, children=True)
-        else:
-            try:
-                layout_object = get_layout(layout)
-            except MissingLayout as error:
-                raise StyleValueError(
-                    str(error),
-                    help_text=layout_property_help_text(self.name, context="inline"),
-                )
-            if obj.set_rule("layout", layout_object):
-                obj.refresh(layout=True, children=True)
+            return
+
+        if isinstance(layout, Layout):
+            layout = layout.name
+
+        if obj.layout is not None and obj.layout.name == layout:
+            return
+
+        try:
+            layout_object = get_layout(layout)
+        except MissingLayout as error:
+            raise StyleValueError(
+                str(error),
+                help_text=layout_property_help_text(self.name, context="inline"),
+            )
+        if obj.set_rule("layout", layout_object):
+            obj.refresh(layout=True, children=True)
 
 
 class OffsetProperty:
@@ -744,10 +750,10 @@ class OffsetProperty:
         _rich_traceback_omit = True
         if offset is None:
             if obj.clear_rule(self.name):
-                obj.refresh(layout=True)
+                obj.refresh(layout=True, repaint=False)
         elif isinstance(offset, ScalarOffset):
             if obj.set_rule(self.name, offset):
-                obj.refresh(layout=True)
+                obj.refresh(layout=True, repaint=False)
         else:
             x, y = offset
 
@@ -770,10 +776,10 @@ class OffsetProperty:
             _offset = ScalarOffset(scalar_x, scalar_y)
 
             if obj.set_rule(self.name, _offset):
-                obj.refresh(layout=True)
+                obj.refresh(layout=True, repaint=False)
 
 
-class StringEnumProperty:
+class StringEnumProperty(Generic[EnumType]):
     """Descriptor for getting and setting string properties and ensuring that the set
     value belongs in the set of valid values.
 
@@ -782,31 +788,38 @@ class StringEnumProperty:
         default: The default value (or a factory thereof) of the property.
         layout: Whether to refresh the node layout on value change.
         refresh_children: Whether to refresh the node children on value change.
+        display: Does this property change display?
     """
 
     def __init__(
         self,
         valid_values: set[str],
-        default: str,
+        default: EnumType,
         layout: bool = False,
         refresh_children: bool = False,
         refresh_parent: bool = False,
+        display: bool = False,
+        pointer: bool = False,
     ) -> None:
         self._valid_values = valid_values
         self._default = default
         self._layout = layout
         self._refresh_children = refresh_children
         self._refresh_parent = refresh_parent
+        self._display = display
+        self._pointer = pointer
 
     def __set_name__(self, owner: StylesBase, name: str) -> None:
         self.name = name
 
-    def __get__(self, obj: StylesBase, objtype: type[StylesBase] | None = None) -> str:
+    def __get__(
+        self, obj: StylesBase, objtype: type[StylesBase] | None = None
+    ) -> EnumType:
         """Get the string property, or the default value if it's not set.
 
         Args:
-            obj: The ``Styles`` object.
-            objtype: The ``Styles`` class.
+            obj: The `Styles` object.
+            objtype: The `Styles` class.
 
         Returns:
             The string property value.
@@ -816,11 +829,11 @@ class StringEnumProperty:
     def _before_refresh(self, obj: StylesBase, value: str | None) -> None:
         """Do any housekeeping before asking for a layout refresh after a value change."""
 
-    def __set__(self, obj: StylesBase, value: str | None = None):
+    def __set__(self, obj: StylesBase, value: EnumType | None = None):
         """Set the string property and ensure it is in the set of allowed values.
 
         Args:
-            obj: The ``Styles`` object.
+            obj: The `Styles` object.
             value: The string value to set the property to.
 
         Raises:
@@ -835,6 +848,12 @@ class StringEnumProperty:
                     children=self._refresh_children,
                     parent=self._refresh_parent,
                 )
+
+                if self._display:
+                    node = obj.node
+                    if node is not None and node.parent:
+                        node._nodes.updated()
+
         else:
             if value not in self._valid_values:
                 raise StyleValueError(
@@ -846,12 +865,24 @@ class StringEnumProperty:
                     ),
                 )
             if obj.set_rule(self.name, value):
+                if self._display and obj.node is not None:
+                    node = obj.node
+                    if node.parent:
+                        node._nodes.updated()
+
                 self._before_refresh(obj, value)
                 obj.refresh(
                     layout=self._layout,
                     children=self._refresh_children,
                     parent=self._refresh_parent,
                 )
+                if self._pointer and obj.node is not None:
+                    from textual.dom import NoScreen
+
+                    try:
+                        obj.node.screen.update_pointer_shape()
+                    except NoScreen:
+                        pass
 
 
 class OverflowProperty(StringEnumProperty):
@@ -985,10 +1016,10 @@ class ColorProperty:
                     raise StyleValueError(
                         f"Invalid color value '{token}'",
                         help_text=color_property_help_text(
-                            self.name, context="inline", error=error
+                            self.name, context="inline", error=error, value=token
                         ),
                     )
-            parsed_color = parsed_color.with_alpha(alpha)
+            parsed_color = parsed_color.multiply_alpha(alpha)
 
             if obj.set_rule(self.name, parsed_color):
                 obj.refresh(children=True)
@@ -1169,7 +1200,7 @@ class FractionalProperty:
 
 
 class AlignProperty:
-    """Combines the horizontal and vertical alignment properties in to a single property."""
+    """Combines the horizontal and vertical alignment properties into a single property."""
 
     def __set_name__(self, owner: StylesBase, name: str) -> None:
         self.horizontal = f"{name}_horizontal"

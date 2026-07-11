@@ -105,7 +105,7 @@ The following example shows how focus works in practice.
     ```{.textual path="docs/examples/guide/input/key03.py", press="H,e,l,l,o,tab,W,o,r,l,d,!"}
     ```
 
-The app splits the screen in to quarters, with a `RichLog` widget in each quarter. If you click any of the text logs, you should see that it is highlighted to show that the widget has focus. Key events will be sent to the focused widget only.
+The app splits the screen into quarters, with a `RichLog` widget in each quarter. If you click any of the text logs, you should see that it is highlighted to show that the widget has focus. Key events will be sent to the focused widget only.
 
 !!! tip
 
@@ -172,19 +172,26 @@ The tuple of three strings may be enough for simple bindings, but you can also r
 
 Individual bindings may be marked as a *priority*, which means they will be checked prior to the bindings of the focused widget. This feature is often used to create hot-keys on the app or screen. Such bindings can not be disabled by binding the same key on a widget.
 
-You can create priority key bindings by setting `priority=True` on the Binding object. Textual uses this feature to add a default binding for ++ctrl+c++ so there is always a way to exit the app. Here's the bindings from the App base class. Note the first binding is set as a priority:
+You can create priority key bindings by setting `priority=True` on the Binding object. Textual uses this feature to add a default binding for ++ctrl+q++ so there is always a way to exit the app. Here's the `BINDINGS` from the App base class. Note the quit binding is set as a priority:
 
 ```python
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
-        Binding("tab", "focus_next", "Focus Next", show=False),
-        Binding("shift+tab", "focus_previous", "Focus Previous", show=False),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True)
     ]
 ```
 
 ### Show bindings
 
 The [footer](../widgets/footer.md) widget can inspect bindings to display available keys. If you don't want a binding to display in the footer you can set `show=False`. The default bindings on App do this so that the standard ++ctrl+c++, ++tab++ and ++shift+tab++ bindings don't typically appear in the footer.
+
+
+### Dynamic bindings?
+
+You may find you have bindings which are not always applicable given the current state of your app.
+For instance a "Save file" binding when there are no changes to save.
+It wouldn't be a good user experience if the save key did nothing, or raised an error.
+
+Textual doesn't support modifying the bindings at runtime, but you can accomplish this with [dynamic actions](./actions.md#dynamic-actions) which offers greater flexibility.
 
 
 ## Mouse Input
@@ -255,6 +262,8 @@ If you want your app to respond to a mouse click you should prefer the Click eve
 
 Most mice have a scroll wheel which you can use to scroll the window underneath the cursor. Scrollable containers in Textual will handle these automatically, but you can handle [MouseScrollDown](../events/mouse_scroll_down.md) and [MouseScrollUp](../events/mouse_scroll_up.md) if you want build your own scrolling functionality.
 
+For terminals that support horizontal mouse wheel, Textual sends [MouseScrollLeft](../events/mouse_scroll_left.md) and [MouseScrollRight](../events/mouse_scroll_right.md), and scrollable containers handle them automatically.
+
 !!! information
 
-    Terminal emulators will typically convert trackpad gestures in to scroll events.
+    Terminal emulators will typically convert trackpad gestures into scroll events.

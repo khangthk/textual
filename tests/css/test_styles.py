@@ -90,21 +90,21 @@ def test_merge_rules():
 def test_render_styles_border():
     base = Styles()
     inline = Styles()
-    styles_view = RenderStyles(None, base, inline)
+    styles_view = RenderStyles(DOMNode(), base, inline)
 
     base.border_top = ("heavy", "red")
     # Base has border-top: heavy red
     assert styles_view.border_top == ("heavy", Color.parse("red"))
 
-    inline.border_left = ("rounded", "green")
-    # Base has border-top heavy red, inline has border-left: rounded green
+    inline.border_left = ("round", "green")
+    # Base has border-top heavy red, inline has border-left: round green
     assert styles_view.border_top == ("heavy", Color.parse("red"))
-    assert styles_view.border_left == ("rounded", Color.parse("green"))
+    assert styles_view.border_left == ("round", Color.parse("green"))
     assert styles_view.border == (
         ("heavy", Color.parse("red")),
         ("", Color(0, 255, 0)),
         ("", Color(0, 255, 0)),
-        ("rounded", Color.parse("green")),
+        ("round", Color.parse("green")),
     )
 
 

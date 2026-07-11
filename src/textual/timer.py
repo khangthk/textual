@@ -15,6 +15,7 @@ from rich.repr import Result, rich_repr
 
 from textual import _time, events
 from textual._callback import invoke
+from textual._compat import cached_property
 from textual._context import active_app
 from textual._time import sleep
 from textual._types import MessageTarget
@@ -35,7 +36,7 @@ class Timer:
         event_target: The object which will receive the timer events.
         interval: The time between timer events, in seconds.
         name: A name to assign the event (for debugging).
-        callback: A optional callback to invoke when the event is handled.
+        callback: An optional callback to invoke when the event is handled.
         repeat: The number of times to repeat the timer, or None to repeat forever.
         skip: Enable skipping of scheduled events that couldn't be sent in time.
         pause: Start the timer paused.
@@ -62,11 +63,16 @@ class Timer:
         self._callback = callback
         self._repeat = repeat
         self._skip = skip
-        self._active = Event()
         self._task: Task | None = None
         self._reset: bool = False
-        if not pause:
-            self._active.set()
+        self._original_pause = pause
+
+    @cached_property
+    def _active(self) -> Event:
+        event = Event()
+        if not self._original_pause:
+            event.set()
+        return event
 
     def __rich_repr__(self) -> Result:
         yield self._interval
@@ -85,12 +91,7 @@ class Timer:
         self._task = create_task(self._run_timer(), name=self.name)
 
     def stop(self) -> None:
-        """Stop the timer.
-
-        Returns:
-            A Task object. Await this to wait until the timer has completed.
-
-        """
+        """Stop the timer."""
         if self._task is None:
             return
 
@@ -151,6 +152,7 @@ class Timer:
         count = 0
         _repeat = self._repeat
         _interval = self._interval
+        self._active  # Force instantiation in same thread
         await self._active.wait()
         start = _time.get_time()
 
@@ -158,7 +160,7 @@ class Timer:
             next_timer = start + ((count + 1) * _interval)
             now = _time.get_time()
             if self._skip and next_timer < now:
-                count += 1
+                count = int((now - start) / _interval + 1)
                 continue
             now = _time.get_time()
             wait_time = max(0, next_timer - now)
@@ -177,6 +179,11 @@ class Timer:
 
     async def _tick(self, *, next_timer: float, count: int) -> None:
         """Triggers the Timer's action: either call its callback, or sends an event to its target"""
+
+        app = active_app.get()
+        if app._exit:
+            return
+
         if self._callback is not None:
             try:
                 await invoke(self._callback)
@@ -185,7 +192,6 @@ class Timer:
                 # Re-raise CancelledErrors that would be caught by the following exception block in Python 3.7
                 raise
             except Exception as error:
-                app = active_app.get()
                 app._handle_exception(error)
         else:
             event = events.Timer(

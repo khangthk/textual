@@ -66,7 +66,7 @@ class Binding:
     key_display: str | None = None
     """How the key should be shown in footer.
 
-    If None, the display of the key will use the result of `App.get_key_display`.
+    If `None`, the display of the key will use the result of `App.get_key_display`.
 
     If overridden in a keymap then this value is ignored.
     """
@@ -81,9 +81,24 @@ class Binding:
     If specified in the App's keymap then Textual will use this ID to lookup the binding,
     and substitute the `key` property of the Binding with the key specified in the keymap.
     """
+    system: bool = False
+    """Make this binding a system binding, which removes it from the key panel."""
+
+    @dataclass(frozen=True)
+    class Group:
+        """A binding group causes the keys to be grouped under a single description."""
+
+        description: str = ""
+        """Description of the group."""
+
+        compact: bool = False
+        """Show keys in compact form (no spaces)."""
+
+    group: Group | None = None
+    """Optional binding group (used to group related bindings in the footer)."""
 
     def parse_key(self) -> tuple[list[str], str]:
-        """Parse a key in to a list of modifiers, and the actual key.
+        """Parse a key into a list of modifiers, and the actual key.
 
         Returns:
             A tuple of (MODIFIER LIST, KEY).
@@ -148,6 +163,8 @@ class Binding:
                     priority=binding.priority,
                     tooltip=binding.tooltip,
                     id=binding.id,
+                    system=binding.system,
+                    group=binding.group,
                 )
 
 

@@ -7,13 +7,148 @@ This class is used by the [command palette](/guide/command_palette) to match sea
 
 from __future__ import annotations
 
-from re import IGNORECASE, compile, escape
+from functools import lru_cache
+from operator import itemgetter
+from re import finditer
+from typing import Iterable, Sequence
 
 import rich.repr
-from rich.style import Style
-from rich.text import Text
 
 from textual.cache import LRUCache
+from textual.content import Content
+from textual.visual import Style
+
+
+class FuzzySearch:
+    """Performs a fuzzy search.
+
+    Unlike a regex solution, this will finds all possible matches.
+    """
+
+    def __init__(
+        self, case_sensitive: bool = False, *, cache_size: int = 1024 * 4
+    ) -> None:
+        """Initialize fuzzy search.
+
+        Args:
+            case_sensitive: Is the match case sensitive?
+            cache_size: Number of queries to cache.
+        """
+
+        self.case_sensitive = case_sensitive
+        self.cache: LRUCache[tuple[str, str], tuple[float, Sequence[int]]] = LRUCache(
+            cache_size
+        )
+
+    def match(self, query: str, candidate: str) -> tuple[float, Sequence[int]]:
+        """Match against a query.
+
+        Args:
+            query: The fuzzy query.
+            candidate: A candidate to check,.
+
+        Returns:
+            A pair of (score, tuple of offsets). `(0, ())` for no result.
+        """
+
+        cache_key = (query, candidate)
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        default: tuple[float, Sequence[int]] = (0.0, [])
+        result = max(self._match(query, candidate), key=itemgetter(0), default=default)
+        self.cache[cache_key] = result
+        return result
+
+    @classmethod
+    @lru_cache(maxsize=1024)
+    def get_first_letters(cls, candidate: str) -> frozenset[int]:
+        return frozenset({match.start() for match in finditer(r"\w+", candidate)})
+
+    def score(self, candidate: str, positions: Sequence[int]) -> float:
+        """Score a search.
+
+        Args:
+            search: Search object.
+
+        Returns:
+            Score.
+        """
+        first_letters = self.get_first_letters(candidate)
+        # This is a heuristic, and can be tweaked for better results
+        # Boost first letter matches
+        offset_count = len(positions)
+        score: float = offset_count + len(first_letters.intersection(positions))
+
+        groups = 1
+        last_offset, *offsets = positions
+        for offset in offsets:
+            if offset != last_offset + 1:
+                groups += 1
+            last_offset = offset
+
+        # Boost to favor less groups
+        normalized_groups = (offset_count - (groups - 1)) / offset_count
+        score *= 1 + (normalized_groups * normalized_groups)
+        return score
+
+    def _match(
+        self, query: str, candidate: str
+    ) -> Iterable[tuple[float, Sequence[int]]]:
+        letter_positions: list[list[int]] = []
+        position = 0
+
+        if not self.case_sensitive:
+            candidate = candidate.lower()
+            query = query.lower()
+        score = self.score
+        if query in candidate:
+            # Quick exit when the query exists as a substring
+            query_location = candidate.find(query)
+            offsets = list(range(query_location, query_location + len(query)))
+            yield (
+                score(candidate, offsets) * (2.0 if candidate == query else 1.5),
+                offsets,
+            )
+            return
+
+        for offset, letter in enumerate(query):
+            last_index = len(candidate) - offset
+            positions: list[int] = []
+            letter_positions.append(positions)
+            index = position
+            while (location := candidate.find(letter, index)) != -1:
+                positions.append(location)
+                index = location + 1
+                if index >= last_index:
+                    break
+            if not positions:
+                yield (0.0, ())
+                return
+            position = positions[0] + 1
+
+        possible_offsets: list[list[int]] = []
+        query_length = len(query)
+
+        def get_offsets(offsets: list[int], positions_index: int) -> None:
+            """Recursively match offsets.
+
+            Args:
+                offsets: A list of offsets.
+                positions_index: Index of query letter.
+
+            """
+            for offset in letter_positions[positions_index]:
+                if not offsets or offset > offsets[-1]:
+                    new_offsets = [*offsets, offset]
+                    if len(new_offsets) == query_length:
+                        possible_offsets.append(new_offsets)
+                    else:
+                        get_offsets(new_offsets, positions_index + 1)
+
+        get_offsets([], 0)
+
+        for offsets in possible_offsets:
+            yield score(candidate, offsets), offsets
 
 
 @rich.repr.auto
@@ -36,11 +171,8 @@ class Matcher:
         """
         self._query = query
         self._match_style = Style(reverse=True) if match_style is None else match_style
-        self._query_regex = compile(
-            ".*?".join(f"({escape(character)})" for character in query),
-            flags=0 if case_sensitive else IGNORECASE,
-        )
-        self._cache: LRUCache[str, float] = LRUCache(1024 * 4)
+        self._case_sensitive = case_sensitive
+        self.fuzzy_search = FuzzySearch()
 
     @property
     def query(self) -> str:
@@ -53,14 +185,9 @@ class Matcher:
         return self._match_style
 
     @property
-    def query_pattern(self) -> str:
-        """The regular expression pattern built from the query."""
-        return self._query_regex.pattern
-
-    @property
     def case_sensitive(self) -> bool:
         """Is this matcher case sensitive?"""
-        return not bool(self._query_regex.flags & IGNORECASE)
+        return self._case_sensitive
 
     def match(self, candidate: str) -> float:
         """Match the candidate against the query.
@@ -71,51 +198,27 @@ class Matcher:
         Returns:
             Strength of the match from 0 to 1.
         """
-        cached = self._cache.get(candidate)
-        if cached is not None:
-            return cached
-        match = self._query_regex.search(candidate)
-        if match is None:
-            score = 0.0
-        else:
-            assert match.lastindex is not None
-            offsets = [
-                match.span(group_no)[0] for group_no in range(1, match.lastindex + 1)
-            ]
-            group_count = 0
-            last_offset = -2
-            for offset in offsets:
-                if offset > last_offset + 1:
-                    group_count += 1
-                last_offset = offset
+        return self.fuzzy_search.match(self.query, candidate)[0]
 
-            score = 1.0 - ((group_count - 1) / len(candidate))
-        self._cache[candidate] = score
-        return score
-
-    def highlight(self, candidate: str) -> Text:
+    def highlight(self, candidate: str) -> Content:
         """Highlight the candidate with the fuzzy match.
 
         Args:
             candidate: The candidate string to match against the query.
 
         Returns:
-            A [rich.text.Text][`Text`] object with highlighted matches.
+            A [`Text`][rich.text.Text] object with highlighted matches.
         """
-        match = self._query_regex.search(candidate)
-        text = Text.from_markup(candidate)
-        if match is None:
-            return text
-        assert match.lastindex is not None
-        if self._query in text.plain:
-            # Favor complete matches
-            offset = text.plain.index(self._query)
-            text.stylize(self._match_style, offset, offset + len(self._query))
-        else:
-            offsets = [
-                match.span(group_no)[0] for group_no in range(1, match.lastindex + 1)
-            ]
-            for offset in offsets:
-                text.stylize(self._match_style, offset, offset + 1)
+        content = Content.from_markup(candidate)
+        score, offsets = self.fuzzy_search.match(self.query, candidate)
+        if not score:
+            return content
+        for offset in offsets:
+            if not candidate[offset].isspace():
+                content = content.stylize(self._match_style, offset, offset + 1)
+        return content
 
-        return text
+
+if __name__ == "__main__":
+    fuzzy_search = FuzzySearch()
+    fuzzy_search.match("foo.bar", "foo/egg.bar")

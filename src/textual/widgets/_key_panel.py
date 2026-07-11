@@ -71,7 +71,10 @@ class BindingsTable(Static):
             action_to_bindings: defaultdict[str, list[tuple[Binding, bool, str]]]
             action_to_bindings = defaultdict(list)
             for _, binding, enabled, tooltip in table_bindings:
-                action_to_bindings[binding.action].append((binding, enabled, tooltip))
+                if not binding.system:
+                    action_to_bindings[binding.action].append(
+                        (binding, enabled, tooltip)
+                    )
 
             description_style = self.get_component_rich_style(
                 "bindings-table--description"
@@ -83,18 +86,21 @@ class BindingsTable(Static):
                     binding.description, end="", style=description_style
                 )
                 if binding.tooltip:
-                    text.append(" ")
+                    if binding.description:
+                        text.append(" ")
                     text.append(binding.tooltip, "dim")
                 return text
 
             get_key_display = self.app.get_key_display
             for multi_bindings in action_to_bindings.values():
                 binding, enabled, tooltip = multi_bindings[0]
-                key_display = " ".join(
-                    get_key_display(binding) for binding, _, _ in multi_bindings
+                keys_display = " ".join(
+                    dict.fromkeys(  # Remove duplicates while preserving order
+                        get_key_display(binding) for binding, _, _ in multi_bindings
+                    )
                 )
                 table.add_row(
-                    Text(key_display, style=key_style),
+                    Text(keys_display, style=key_style),
                     render_description(binding),
                 )
             if namespace != previous_namespace:
@@ -114,11 +120,11 @@ class KeyPanel(VerticalScroll, can_focus=False):
     """
 
     DEFAULT_CSS = """
-    KeyPanel {                    
+    KeyPanel {
         split: right;
         width: 33%;
-        min-width: 30;              
-        max-width: 60;    
+        min-width: 30;
+        max-width: 60;
         border-left: vkey $foreground 30%;
         padding: 0 1;
         height: 1fr;
@@ -126,7 +132,7 @@ class KeyPanel(VerticalScroll, can_focus=False):
         align: center top;
 
         &> BindingsTable > .bindings-table--key {
-            color: $secondary;           
+            color: $text-accent;
             text-style: bold;
             padding: 0 1;
         }
@@ -139,14 +145,15 @@ class KeyPanel(VerticalScroll, can_focus=False):
             color: transparent;
         }
 
-        &> BindingsTable > .bindings-table--header {
-            text-style: dim italic;
+        &> BindingsTable > .bindings-table--header {        
+            color: $text-primary;
+            text-style: underline;
         }
 
         #bindings-table {
             width: auto;
             height: auto;
-        }      
+        }
     }
     """
 
@@ -156,14 +163,20 @@ class KeyPanel(VerticalScroll, can_focus=False):
         yield BindingsTable(shrink=True, expand=False)
 
     async def on_mount(self) -> None:
+        mount_screen = self.screen
+
         async def bindings_changed(screen: Screen) -> None:
+            """Update bindings."""
             if not screen.app.app_focus:
                 return
-            if self.is_attached and screen is self.screen:
-                self.refresh(recompose=True)
+            if self.is_attached and screen is mount_screen:
+                await self.recompose()
+
+        def _bindings_changed(screen: Screen) -> None:
+            self.call_after_refresh(bindings_changed, screen)
 
         self.set_class(self.app.ansi_color, "-ansi-scrollbar")
-        self.screen.bindings_updated_signal.subscribe(self, bindings_changed)
+        self.screen.bindings_updated_signal.subscribe(self, _bindings_changed)
 
     def on_unmount(self) -> None:
         self.screen.bindings_updated_signal.unsubscribe(self)

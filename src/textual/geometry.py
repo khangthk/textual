@@ -5,12 +5,15 @@ Functions and classes to manage terminal geometry (anything involving coordinate
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from operator import attrgetter, itemgetter
 from typing import (
     TYPE_CHECKING,
     Any,
     Collection,
+    Iterable,
+    Literal,
     NamedTuple,
     Tuple,
     TypeVar,
@@ -23,6 +26,7 @@ from typing_extensions import Final
 if TYPE_CHECKING:
     from typing_extensions import TypeAlias
 
+import rich.repr
 
 SpacingDimensions: TypeAlias = Union[
     int, Tuple[int], Tuple[int, int], Tuple[int, int, int, int]
@@ -104,6 +108,12 @@ class Offset(NamedTuple):
         x, y = self
         return Offset(0 if x < 0 else x, 0 if y < 0 else y)
 
+    @property
+    def transpose(self) -> tuple[int, int]:
+        """A tuple of x and y, in reverse order, i.e. (y, x)."""
+        x, y = self
+        return y, x
+
     def __bool__(self) -> bool:
         return self != (0, 0)
 
@@ -125,6 +135,9 @@ class Offset(NamedTuple):
         if isinstance(other, (float, int)):
             x, y = self
             return Offset(int(x * other), int(y * other))
+        if isinstance(other, tuple):
+            x, y = self
+            return Offset(int(x * other[0]), int(y * other[1]))
         return NotImplemented
 
     def __neg__(self) -> Offset:
@@ -404,7 +417,7 @@ class Region(NamedTuple):
         """Calculate the smallest offset required to translate a window so that it contains
         another region.
 
-        This method is used to calculate the required offset to scroll something in to view.
+        This method is used to calculate the required offset to scroll something into view.
 
         Args:
             window_region: The window region.
@@ -429,7 +442,7 @@ class Region(NamedTuple):
             and (window_right > right >= window_left)
         ):
             # The region does not fit
-            # The window needs to scroll on the X axis to bring region in to view
+            # The window needs to scroll on the X axis to bring region into view
             delta_x = min(
                 left - window_left,
                 left - (window_right - region.width),
@@ -443,7 +456,7 @@ class Region(NamedTuple):
             (window_bottom > top_ >= window_top)
             and (window_bottom > bottom >= window_top)
         ):
-            # The window needs to scroll on the Y axis to bring region in to view
+            # The window needs to scroll on the Y axis to bring region into view
             delta_y = min(
                 top_ - window_top,
                 top_ - (window_bottom - region.height),
@@ -537,6 +550,12 @@ class Region(NamedTuple):
         """
         x, y, width, height = self
         return Offset(x + width, y + height)
+
+    @property
+    def bottom_right_inclusive(self) -> Offset:
+        """Bottom right corner of the region, within its boundaries."""
+        x, y, width, height = self
+        return Offset(x + width - 1, y + height - 1)
 
     @property
     def size(self) -> Size:
@@ -842,7 +861,7 @@ class Region(NamedTuple):
 
     @lru_cache(maxsize=1024)
     def split(self, cut_x: int, cut_y: int) -> tuple[Region, Region, Region, Region]:
-        """Split a region in to 4 from given x and y offsets (cuts).
+        """Split a region into 4 from given x and y offsets (cuts).
 
         ```
                    cut_x ↓
@@ -882,7 +901,7 @@ class Region(NamedTuple):
 
     @lru_cache(maxsize=1024)
     def split_vertical(self, cut: int) -> tuple[Region, Region]:
-        """Split a region in to two, from a given x offset.
+        """Split a region into two, from a given x offset.
 
         ```
                  cut ↓
@@ -911,7 +930,7 @@ class Region(NamedTuple):
 
     @lru_cache(maxsize=1024)
     def split_horizontal(self, cut: int) -> tuple[Region, Region]:
-        """Split a region in to two, from a given y offset.
+        """Split a region into two, from a given y offset.
 
         ```
                     ┌─────────┐
@@ -986,6 +1005,11 @@ class Region(NamedTuple):
         A positive value will move the region right or down, a negative value will move
         the region left or up. A value of `0` will leave that axis unmodified.
 
+        If a margin is provided, it will add space between the resulting region.
+
+        Note that if margin is specified it *overlaps*, so the space will be the maximum
+        of two edges, and not the total.
+
         ```
         ╔══════════╗    │
         ║          ║
@@ -993,13 +1017,11 @@ class Region(NamedTuple):
         ║          ║
         ╚══════════╝    │
 
-        ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─ ─ ─ ─ ─ ─ ─
-
-                        │    ┌──────────┐
-                             │          │
-                        │    │  Result  │
-                             │          │
-                        │    └──────────┘
+        ─ ─ ─ ─ ─ ─ ─ ─ ┌──────────┐
+                        │          │
+                        │  Result  │
+                        │          │
+                        └──────────┘
         ```
 
         Args:
@@ -1013,10 +1035,88 @@ class Region(NamedTuple):
         inflect_margin = NULL_SPACING if margin is None else margin
         x, y, width, height = self
         if x_axis:
-            x += (width + inflect_margin.width) * x_axis
+            x += (width + inflect_margin.max_width) * x_axis
         if y_axis:
-            y += (height + inflect_margin.height) * y_axis
+            y += (height + inflect_margin.max_height) * y_axis
         return Region(x, y, width, height)
+
+    def constrain(
+        self,
+        constrain_x: Literal["none", "inside", "inflect"],
+        constrain_y: Literal["none", "inside", "inflect"],
+        margin: Spacing,
+        container: Region,
+    ) -> Region:
+        """Constrain a region to fit within a container, using different methods per axis.
+
+        Args:
+            constrain_x: Constrain method for the X-axis.
+            constrain_y: Constrain method for the Y-axis.
+            margin: Margin to maintain around region.
+            container: Container to constrain to.
+
+        Returns:
+            New widget, that fits inside the container (if possible).
+        """
+        margin_region = self.grow(margin)
+        region = self
+
+        def compare_span(
+            span_start: int, span_end: int, container_start: int, container_end: int
+        ) -> int:
+            """Compare a span with a container
+
+            Args:
+                span_start: Start of the span.
+                span_end: end of the span.
+                container_start: Start of the container.
+                container_end: End of the container.
+
+            Returns:
+                0 if the span fits, -1 if it is less that the container, otherwise +1
+            """
+            if span_start >= container_start and span_end <= container_end:
+                return 0
+            if span_start < container_start:
+                return -1
+            return +1
+
+        # Apply any inflected constraints
+        if constrain_x == "inflect" or constrain_y == "inflect":
+            region = region.inflect(
+                (
+                    -compare_span(
+                        margin_region.x,
+                        margin_region.right,
+                        container.x,
+                        container.right,
+                    )
+                    if constrain_x == "inflect"
+                    else 0
+                ),
+                (
+                    -compare_span(
+                        margin_region.y,
+                        margin_region.bottom,
+                        container.y,
+                        container.bottom,
+                    )
+                    if constrain_y == "inflect"
+                    else 0
+                ),
+                margin,
+            )
+
+        # Apply translate inside constrains
+        # Note this is also applied, if a previous inflect constrained has been applied
+        # This is so that the origin is always inside the container
+        region = region.translate_inside(
+            container.shrink(margin),
+            constrain_x != "none",
+            constrain_y != "none",
+        )
+
+        return region
 
 
 class Spacing(NamedTuple):
@@ -1071,6 +1171,18 @@ class Spacing(NamedTuple):
     def height(self) -> int:
         """Total space in the y axis."""
         return self.top + self.bottom
+
+    @property
+    def max_width(self) -> int:
+        """The space between regions in the X direction if margins overlap, i.e. `max(self.left, self.right)`."""
+        _top, right, _bottom, left = self
+        return left if left > right else right
+
+    @property
+    def max_height(self) -> int:
+        """The space between regions in the Y direction if margins overlap, i.e. `max(self.top, self.bottom)`."""
+        top, _right, bottom, _left = self
+        return top if top > bottom else bottom
 
     @property
     def top_left(self) -> tuple[int, int]:
@@ -1206,8 +1318,177 @@ class Spacing(NamedTuple):
         )
 
 
+class Shape:
+    """An arbitrary shape defined by a sequence of regions.
+
+    This class currently exists to filter widgets within a shape defined when the user is selecting text.
+
+    """
+
+    __slots__ = [
+        "_regions",
+        "_bounds",
+    ]
+
+    def __init__(self, regions: Iterable[Region]):
+        """
+
+        Args:
+            regions: Regions which will define the shape.
+        """
+        self._regions = tuple(regions)
+        self._bounds = (
+            Region.from_union(self._regions) if self._regions else NULL_REGION
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self._bounds)
+
+    def __hash__(self) -> int:
+        return hash(self._regions)
+
+    def __rich_repr__(self) -> rich.repr.Result:
+        yield self._regions
+
+    def draw(self, size: Size) -> str:
+        """Build a string with a 2D grid of results from contains_point.
+
+        This is a debugging aid (do not use in production).
+        """
+        width, height = size
+        map: list[list[str]] = []
+        for y in range(height):
+            map.append([".X"[self.contains_point(Offset(x, y))] for x in range(width)])
+        return "\n".join("".join(line) for line in map)
+
+    @property
+    def regions(self) -> tuple[Region, ...]:
+        """The regions in the shape."""
+        return self._regions
+
+    @property
+    def bounds(self) -> Region:
+        """A region that encloses the shape."""
+        return self._bounds
+
+    @property
+    def area(self) -> int:
+        """Cells covered by the shape."""
+        # TODO: Currently doesn't handle overlapping regions
+        return sum(region.area for region in self._regions)
+
+    @classmethod
+    def selection_bounds(cls, container: Region, start: Offset, end: Offset) -> Shape:
+        """Get a shape that would be constructed by a user selecting text between two points.
+
+        The shape would look something like this:
+
+        ```
+            XXXXXXXXXX <- top
+        XXXXXXXXXXXXXX
+        XXXXXXXXXXXXXX <- middle
+        XXXXXXXXXXXXXX
+        XXXXXXXXX      <- bottom
+        ```
+
+        Args:
+            container: The container region for the selection.
+            start: The start offset.
+            end: The end offset.
+
+        Returns:
+            A new shape covering the selection bounds.
+        """
+        if start.transpose > end.transpose:
+            end, start = start, end
+        start_x, start_y = start
+        end_x, end_y = end
+
+        def get_regions() -> Iterable[Region]:
+            """Get regions to cover selection bounds.
+
+            Yields:
+                Regions to cover bounds.
+            """
+            # Special case where start and end offsets are on the edges, and the shape
+            # becomes a single region
+            if start_x == container.x and end_x == container.right:
+                yield Region(
+                    container.x,
+                    start_y,
+                    container.width,
+                    end_y - start_y + 1,
+                )
+
+            # Simple case: all on one line
+            elif start.y == end.y:
+                yield Region(
+                    start_x,
+                    start_y,
+                    end_x - start_x,
+                    1,
+                )
+
+            # Shape is on two or more lines
+            else:
+                # top
+                yield Region(
+                    start_x,
+                    start_y,
+                    container.right - start_x,
+                    1,
+                )
+                # middle
+                if end.y - start.y > 1:
+                    # We need a middle region between the top and the bottom
+                    yield Region(
+                        container.x,
+                        start_y + 1,
+                        container.width,
+                        end_y - start_y - 1,
+                    )
+                # bottom
+                yield Region(
+                    container.x,
+                    end_y,
+                    end_x - container.x,
+                    1,
+                )
+
+        return Shape(get_regions())
+
+    def overlaps(self, region: Region) -> bool:
+        """Does a region overlap this shape?
+
+        Args:
+            region: A Region to check.
+
+        Returns:
+            `True` if any part of the shape overlaps the region, `False` if there is no overlap.
+        """
+        return any(shape_region.overlaps(region) for shape_region in self._regions)
+
+    def contains_point(self, offset: Offset) -> bool:
+        """Check if the given offset is within the shape.
+
+        Args:
+            offset: An offset.
+
+        Returns:
+            `True` if the given offset is anywhere within the shape, otherwise `False`.
+        """
+        return any(region.contains_point(offset) for region in self._regions)
+
+
+if not TYPE_CHECKING and os.environ.get("TEXTUAL_SPEEDUPS", "1") == "1":
+    try:
+        from textual_speedups import Offset, Region, Size, Spacing
+    except ImportError:
+        pass
+
+
 NULL_OFFSET: Final = Offset(0, 0)
-"""An [offset][textual.geometry.Offset] constant for (0, 0)."""
+"""An [Offset][textual.geometry.Offset] constant for (0, 0)."""
 
 NULL_REGION: Final = Region(0, 0, 0, 0)
 """A [Region][textual.geometry.Region] constant for a null region (at the origin, with both width and height set to zero)."""

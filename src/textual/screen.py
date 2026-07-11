@@ -20,6 +20,8 @@ from typing import (
     Generic,
     Iterable,
     Iterator,
+    Literal,
+    NamedTuple,
     Optional,
     TypeVar,
     Union,
@@ -31,30 +33,35 @@ from rich.style import Style
 
 from textual import constants, errors, events, messages
 from textual._arrange import arrange
+from textual._auto_scroll import get_auto_scroll_regions
 from textual._callback import invoke
 from textual._compositor import Compositor, MapGeometry
 from textual._context import active_message_pump, visible_screen_stack
-from textual._layout import DockArrangeResult
 from textual._path import (
     CSSPathType,
     _css_path_type_as_list,
     _make_path_object_relative,
 )
 from textual._types import CallbackType
+from textual.actions import SkipAction
 from textual.await_complete import AwaitComplete
 from textual.binding import ActiveBinding, Binding, BindingsMap
 from textual.css.match import match
 from textual.css.parse import parse_selectors
 from textual.css.query import NoMatches, QueryType
+from textual.css.styles import PointerShape
 from textual.dom import DOMNode
 from textual.errors import NoWidget
-from textual.geometry import Offset, Region, Size
+from textual.geometry import Offset, Region, Shape, Size
 from textual.keys import key_to_character
-from textual.reactive import Reactive
+from textual.layout import DockArrangeResult
+from textual.reactive import Reactive, var
 from textual.renderables.background_screen import BackgroundScreen
 from textual.renderables.blank import Blank
+from textual.selection import SELECT_ALL, SelectEnd, Selection, SelectStart, SelectState
 from textual.signal import Signal
 from textual.timer import Timer
+from textual.walk import walk_selectable_widgets
 from textual.widget import Widget
 from textual.widgets import Tooltip
 from textual.widgets._toast import ToastRack
@@ -78,6 +85,23 @@ ScreenResultCallbackType = Union[
     Callable[[Optional[ScreenResultType]], Awaitable[None]],
 ]
 """Type of a screen result callback function."""
+
+
+class HoverWidgets(NamedTuple):
+    """Result of [get_hover_widget_at][textual.screen.Screen.get_hover_widget_at]"""
+
+    mouse_over: tuple[Widget, Region]
+    """Widget and region directly under the mouse."""
+    hover_over: tuple[Widget, Region] | None
+    """Widget with a hover style under the mouse, or `None` for no hover style widget."""
+
+    @property
+    def widgets(self) -> tuple[Widget, Widget | None]:
+        """Just the widgets."""
+        return (
+            self.mouse_over[0],
+            None if self.hover_over is None else self.hover_over[0],
+        )
 
 
 @rich.repr.auto
@@ -145,12 +169,13 @@ class Screen(Generic[ScreenResultType], Widget):
         This CSS applies to the whole app.
     """
 
+    COMPONENT_CLASSES = {"screen--selection"}
+
     DEFAULT_CSS = """
     Screen {
-    
         layout: vertical;
         overflow-y: auto;
-        background: $surface;        
+        background: $background;        
         
         &:inline {
             height: auto;
@@ -158,19 +183,26 @@ class Screen(Generic[ScreenResultType], Widget):
             border-top: tall $background;
             border-bottom: tall $background;
         }
-
+        & > .screen--selection {
+            background: $screen-selection-background;
+            color: $screen-selection-foreground;           
+        }
         &:ansi {
             background: ansi_default;
             color: ansi_default;
-
-            &.-screen-suspended {                                            
+            &.-screen-suspended {
                 text-style: dim;
                 ScrollBar {
                     text-style: not dim;
                 }
             }
+            &:inline {
+                border-top: tall $ansi-background;
+                border-bottom: tall $ansi-background;
+            }
         }
     }
+    
     """
 
     TITLE: ClassVar[str | None] = None
@@ -189,6 +221,11 @@ class Screen(Generic[ScreenResultType], Widget):
     you can set the [sub_title][textual.screen.Screen.sub_title] attribute.
     """
 
+    HORIZONTAL_BREAKPOINTS: ClassVar[list[tuple[int, str]]] | None = None
+    """Horizontal breakpoints, will override [App.HORIZONTAL_BREAKPOINTS][textual.app.App.HORIZONTAL_BREAKPOINTS] if not `None`."""
+    VERTICAL_BREAKPOINTS: ClassVar[list[tuple[int, str]]] | None = None
+    """Vertical breakpoints, will override [App.VERTICAL_BREAKPOINTS][textual.app.App.VERTICAL_BREAKPOINTS] if not `None`."""
+
     focused: Reactive[Widget | None] = Reactive(None)
     """The focused [widget][textual.widget.Widget] or `None` for no focus.
     To set focus, do not update this value directly. Use [set_focus][textual.screen.Screen.set_focus] instead."""
@@ -204,8 +241,9 @@ class Screen(Generic[ScreenResultType], Widget):
 
     Should be a set of [`command.Provider`][textual.command.Provider] classes.
     """
-    ALLOW_IN_MAXIMIZED_VIEW: ClassVar[str] = ".-textual-system,Footer"
-    """A selector for the widgets (direct children of Screen) that are allowed in the maximized view (in addition to maximized widget)."""
+    ALLOW_IN_MAXIMIZED_VIEW: ClassVar[str | None] = None
+    """A selector for the widgets (direct children of Screen) that are allowed in the maximized view (in addition to maximized widget). Or
+    `None` to default to [App.ALLOW_IN_MAXIMIZED_VIEW][textual.app.App.ALLOW_IN_MAXIMIZED_VIEW]"""
 
     ESCAPE_TO_MINIMIZE: ClassVar[bool | None] = None
     """Use escape key to minimize (potentially overriding bindings) or `None` to defer to [`App.ESCAPE_TO_MINIMIZE`][textual.app.App.ESCAPE_TO_MINIMIZE]."""
@@ -213,9 +251,25 @@ class Screen(Generic[ScreenResultType], Widget):
     maximized: Reactive[Widget | None] = Reactive(None, layout=True)
     """The currently maximized widget, or `None` for no maximized widget."""
 
+    selections: var[dict[Widget, Selection]] = var(dict)
+    """Map of widgets and selected ranges."""
+
+    _selecting = var(False)
+    """Indicates mouse selection is in progress."""
+
+    _select_state: Reactive[SelectState | None] = Reactive(None)
+    """Current select state, if selecting."""
+
+    _mouse_down_offset: var[Offset | None] = var(None)
+    """Last mouse down screen offset, or `None` if the mouse is up."""
+
+    _pointer_shape: var[PointerShape] = var("default")
+    """The current mouse pointer shape."""
+
     BINDINGS = [
         Binding("tab", "app.focus_next", "Focus Next", show=False),
         Binding("shift+tab", "app.focus_previous", "Focus Previous", show=False),
+        Binding("ctrl+c,super+c", "screen.copy_text", "Copy selected text", show=False),
     ]
 
     def __init__(
@@ -261,10 +315,22 @@ class Screen(Generic[ScreenResultType], Widget):
         )
         """The signal that is published when the screen's layout is refreshed."""
 
-        self._bindings_updated = False
-        """Indicates that a binding update was requested."""
         self.bindings_updated_signal: Signal[Screen] = Signal(self, "bindings_updated")
         """A signal published when the bindings have been updated"""
+
+        self.text_selection_started_signal: Signal[Screen] = Signal(
+            self, "selection_started"
+        )
+        """A signal published when text selection has started."""
+
+        self._css_update_count = -1
+        """Track updates to CSS."""
+
+        self._layout_widgets: dict[DOMNode, set[Widget]] = {}
+        """Widgets whose layout may have changed."""
+
+        self._auto_select_scroll_timer: Timer | None = None
+        """A timer to auto scroll a container."""
 
     @property
     def is_modal(self) -> bool:
@@ -304,16 +370,28 @@ class Screen(Generic[ScreenResultType], Widget):
             extras.append("_tooltips")
         return (*super().layers, *extras)
 
+    @property
+    def size(self) -> Size:
+        """The size of the screen."""
+        return self.app.size - self.styles.gutter.totals
+
     def _watch_focused(self):
         self.refresh_bindings()
 
     def _watch_stack_updates(self):
         self.refresh_bindings()
 
+    async def _watch_selections(
+        self,
+        old_selections: dict[Widget, Selection],
+        selections: dict[Widget, Selection],
+    ):
+        for widget in old_selections.keys() | selections.keys():
+            widget.selection_updated(selections.get(widget, None))
+
     def refresh_bindings(self) -> None:
         """Call to request a refresh of bindings."""
-        self._bindings_updated = True
-        self.check_idle()
+        self.bindings_updated_signal.publish(self)
 
     def _watch_maximized(
         self, previously_maximized: Widget | None, maximized: Widget | None
@@ -419,11 +497,12 @@ class Screen(Generic[ScreenResultType], Widget):
 
         return bindings_map
 
-    def _arrange(self, size: Size) -> DockArrangeResult:
+    def arrange(self, size: Size, _optimal: bool = False) -> DockArrangeResult:
         """Arrange children.
 
         Args:
             size: Size of container.
+            optimal: Ignored on screen.
 
         Returns:
             Widget locations.
@@ -434,15 +513,42 @@ class Screen(Generic[ScreenResultType], Widget):
         if cached_result is not None:
             return cached_result
 
+        allow_in_maximized_view = (
+            self.app.ALLOW_IN_MAXIMIZED_VIEW
+            if self.ALLOW_IN_MAXIMIZED_VIEW is None
+            else self.ALLOW_IN_MAXIMIZED_VIEW
+        )
+
+        def get_maximize_widgets(maximized: Widget) -> list[Widget]:
+            """Get widgets to display in maximized view.
+
+            Returns:
+                A list of widgets.
+
+            """
+            # De-duplicate with a set
+            widgets = {
+                maximized,
+                *self.query_children(allow_in_maximized_view),
+                *self.query_children(".-textual-system"),
+            }
+            # Restore order of widgets.
+            maximize_widgets = [widget for widget in self.children if widget in widgets]
+            # Add the maximized widget, if its not already included
+            if maximized not in maximize_widgets:
+                maximize_widgets.insert(0, maximized)
+            return maximize_widgets
+
         arrangement = self._arrangement_cache[cache_key] = arrange(
             self,
             (
-                [self.maximized, *self.query_children(self.ALLOW_IN_MAXIMIZED_VIEW)]
+                get_maximize_widgets(self.maximized)
                 if self.maximized is not None
                 else self._nodes
             ),
             size,
-            self.screen.size,
+            self.size,
+            False,
         )
 
         return arrangement
@@ -454,6 +560,42 @@ class Screen(Generic[ScreenResultType], Widget):
             return self.app.screen is self
         except Exception:
             return False
+
+    @property
+    def allow_select(self) -> bool:
+        """Check if this widget permits text selection."""
+        return self.ALLOW_SELECT
+
+    def get_loading_widget(self) -> Widget:
+        """Get a widget to display a loading indicator.
+
+        The default implementation will defer to App.get_loading_widget.
+
+        Returns:
+            A widget in place of this widget to indicate a loading.
+        """
+        loading_widget = self.app.get_loading_widget()
+        return loading_widget
+
+    def _watch__pointer_shape(self, pointer_shape: PointerShape) -> None:
+        self.app._set_pointer_shape(pointer_shape)
+
+    def update_pointer_shape(self) -> None:
+        """Get the screen's current pointer shape."""
+        if self._selecting:
+            self._pointer_shape = "text"
+            return
+        widget = self if self.app.mouse_over is None else self.app.mouse_over
+        pointer_shape = "default"
+        for node in widget.ancestors_with_self:
+            if isinstance(node, Widget):
+                if node.loading:
+                    pointer_shape = "wait"
+                    break
+                if (pointer_shape := node.styles.pointer) != "default":
+                    break
+
+        self._pointer_shape = pointer_shape
 
     def render(self) -> RenderableType:
         """Render method inherited from widget, used to render the screen's background.
@@ -467,7 +609,7 @@ class Screen(Generic[ScreenResultType], Widget):
         except LookupError:
             base_screen = None
 
-        if base_screen is not None and background.a < 1:
+        if base_screen is not None and base_screen is not self and background.a < 1:
             # If background is translucent, render a background screen
             return BackgroundScreen(base_screen, background)
 
@@ -503,6 +645,33 @@ class Screen(Generic[ScreenResultType], Widget):
         """
         return self._compositor.get_widget_at(x, y)
 
+    def get_hover_widgets_at(self, x: int, y: int) -> HoverWidgets:
+        """Get the widget, and its region directly under the mouse, and the first
+        widget, region pair with a hover style.
+
+        Args:
+            x: X Coordinate.
+            y: Y Coordinate.
+
+        Returns:
+            A pair of (WIDGET, REGION) tuples for the top most and first hover style respectively.
+
+        Raises:
+            NoWidget: If there is no widget under the screen coordinate.
+
+        """
+        widgets_under_coordinate = iter(self._compositor.get_widgets_at(x, y))
+        try:
+            top_widget, top_region = next(widgets_under_coordinate)
+        except StopIteration:
+            raise errors.NoWidget(f"No hover widget under screen coordinate ({x}, {y})")
+        if not top_widget._has_hover_style:
+            for widget, region in widgets_under_coordinate:
+                if widget._has_hover_style:
+                    return HoverWidgets((top_widget, top_region), (widget, region))
+            return HoverWidgets((top_widget, top_region), None)
+        return HoverWidgets((top_widget, top_region), (top_widget, top_region))
+
     def get_widgets_at(self, x: int, y: int) -> Iterable[tuple[Widget, Region]]:
         """Get all widgets under a given coordinate.
 
@@ -533,6 +702,10 @@ class Screen(Generic[ScreenResultType], Widget):
         except NoWidget:
             return None
 
+        if widget.has_class("-textual-system") or widget.loading:
+            # Clicking Textual system widgets should not focus anything
+            return None
+
         for node in widget.ancestors_with_self:
             if isinstance(node, Widget) and node.focusable:
                 return node
@@ -550,6 +723,20 @@ class Screen(Generic[ScreenResultType], Widget):
         """
         return self._compositor.get_style_at(x, y)
 
+    def get_widget_and_offset_at(
+        self, x: int, y: int
+    ) -> tuple[Widget | None, Offset | None]:
+        """Get the widget under a given coordinate, and an offset within the original content.
+
+        Args:
+            x: X Coordinate.
+            y: Y Coordinate.
+
+        Returns:
+            Tuple of Widget and Offset, both of which may be None.
+        """
+        return self._compositor.get_widget_and_offset_at(x, y)
+
     def find_widget(self, widget: Widget) -> MapGeometry:
         """Get the screen region of a Widget.
 
@@ -564,6 +751,23 @@ class Screen(Generic[ScreenResultType], Widget):
         """
         return self._compositor.find_widget(widget)
 
+    def clear_selection(self) -> None:
+        """Clear any selected text."""
+        self.selections = {}
+        self._select_state = None
+
+    def _select_all_in_widget(self, widget: Widget) -> None:
+        """Select a widget and all its children.
+
+        Args:
+            widget: Widget to select.
+        """
+        select_all = SELECT_ALL
+        self.selections = {
+            widget: select_all,
+            **{child: select_all for child in widget.query("*")},
+        }
+
     @property
     def focus_chain(self) -> list[Widget]:
         """A list of widgets that may receive focus, in focus order."""
@@ -577,9 +781,18 @@ class Screen(Generic[ScreenResultType], Widget):
         # Additionally, we manually keep track of the visibility of the DOM
         # instead of relying on the property `.visible` to save on DOM traversals.
         # node_stack: list[tuple[iterator over node children, node visibility]]
+
+        root_node = self.screen
+
+        if (focused := self.focused) is not None:
+            for node in focused.ancestors_with_self:
+                if node._trap_focus:
+                    root_node = node
+                    break
+
         node_stack: list[tuple[Iterator[Widget], bool]] = [
             (
-                iter(sorted(self.displayed_children, key=focus_sorter)),
+                iter(sorted(root_node.displayed_children, key=focus_sorter)),
                 self.visible,
             )
         ]
@@ -632,8 +845,6 @@ class Screen(Generic[ScreenResultType], Widget):
                 the CSS selectors given in the argument.
         """
 
-        # TODO: This shouldn't be required
-        self._compositor._full_map_invalidated = True
         if not isinstance(selector, str):
             selector = selector.__name__
         selector_set = parse_selectors(selector)
@@ -717,12 +928,15 @@ class Screen(Generic[ScreenResultType], Widget):
         """
         return self._move_focus(-1, selector)
 
-    def maximize(self, widget: Widget, container: bool = True) -> None:
+    def maximize(self, widget: Widget, container: bool = True) -> bool:
         """Maximize a widget, so it fills the screen.
 
         Args:
             widget: Widget to maximize.
             container: If one of the widgets ancestors is a maximizeable widget, maximize that instead.
+
+        Returns:
+            `True` if the widget was maximized, otherwise `False`.
         """
         if widget.allow_maximize:
             if container:
@@ -732,9 +946,11 @@ class Screen(Generic[ScreenResultType], Widget):
                         break
                     if maximize_widget.allow_maximize:
                         self.maximized = maximize_widget
-                        return
+                        return True
 
             self.maximized = widget
+            return True
+        return False
 
     def minimize(self) -> None:
         """Restore any maximized widget to normal state."""
@@ -744,6 +960,36 @@ class Screen(Generic[ScreenResultType], Widget):
                 self.scroll_to_widget, self.focused, animate=False, center=True
             )
 
+    def get_selected_text(self) -> str | None:
+        """Get text under selection.
+
+        Returns:
+            Selected text, or `None` if no text was selected.
+        """
+        if not self.selections:
+            return None
+
+        widget_text: list[str] = []
+        for widget, selection in self.selections.items():
+            # Filter out widgets that may have been removed since the text was selected
+            if (
+                widget.is_attached
+                and (selected_text_in_widget := widget.get_selection(selection))
+                is not None
+            ):
+                widget_text.extend(selected_text_in_widget)
+
+        selected_text = "".join(widget_text).rstrip("\n")
+        return selected_text
+
+    def action_copy_text(self) -> None:
+        """Copy selected text to clipboard."""
+        selection = self.get_selected_text()
+        if selection is None:
+            # No text selected
+            raise SkipAction()
+        self.app.copy_to_clipboard(selection)
+
     def action_maximize(self) -> None:
         """Action to maximize the currently focused widget."""
         if self.focused is not None:
@@ -752,6 +998,24 @@ class Screen(Generic[ScreenResultType], Widget):
     def action_minimize(self) -> None:
         """Action to minimize the currently maximized widget."""
         self.minimize()
+
+    def action_blur(self) -> None:
+        """Action to remove focus (if set)."""
+        self.set_focus(None)
+
+    async def action_focus(self, selector: str) -> None:
+        """An [action](/guide/actions) to focus the given widget.
+
+        Args:
+            selector: Selector of widget to focus (first match).
+        """
+        try:
+            node = self.query(selector).first()
+        except NoMatches:
+            pass
+        else:
+            if isinstance(node, Widget):
+                self.set_focus(node)
 
     def _reset_focus(
         self, widget: Widget, avoiding: list[Widget] | None = None
@@ -828,16 +1092,22 @@ class Screen(Generic[ScreenResultType], Widget):
                     widgets.update(widget.walk_children(with_self=True))
                     break
         if widgets:
-            self.app.stylesheet.update_nodes(
-                [widget for widget in widgets if widget._has_focus_within], animate=True
-            )
+            self.app.stylesheet.update_nodes(widgets, animate=True)
 
-    def set_focus(self, widget: Widget | None, scroll_visible: bool = True) -> None:
+    def set_focus(
+        self,
+        widget: Widget | None,
+        scroll_visible: bool = True,
+        from_app_focus: bool = False,
+    ) -> None:
         """Focus (or un-focus) a widget. A focused widget will receive key events first.
 
         Args:
             widget: Widget to focus, or None to un-focus.
-            scroll_visible: Scroll widget in to view.
+            scroll_visible: Scroll widget into view.
+            from_app_focus: True if this focus is due to the app itself having regained
+                focus. False if the focus is being set because a widget within the app
+                regained focus.
         """
         if widget is self.focused:
             # Widget is already focused
@@ -862,14 +1132,14 @@ class Screen(Generic[ScreenResultType], Widget):
                 # Change focus
                 self.focused = widget
                 # Send focus event
-                widget.post_message(events.Focus())
+                widget.post_message(events.Focus(from_app_focus=from_app_focus))
                 focused = widget
 
                 if scroll_visible:
 
                     def scroll_to_center(widget: Widget) -> None:
                         """Scroll to center (after a refresh)."""
-                        if self.focused is widget and not self.can_view(widget):
+                        if self.focused is widget and not self.can_view_entire(widget):
                             self.scroll_to_center(widget, origin_visible=True)
 
                     self.call_later(scroll_to_center, widget)
@@ -877,7 +1147,7 @@ class Screen(Generic[ScreenResultType], Widget):
                 self.log.debug(widget, "was focused")
 
         self._update_focus_styles(focused, blurred)
-        self.refresh_bindings()
+        self.call_after_refresh(self.refresh_bindings)
 
     def _extend_compose(self, widgets: list[Widget]) -> None:
         """Insert Textual's own internal widgets.
@@ -898,32 +1168,22 @@ class Screen(Generic[ScreenResultType], Widget):
         self.screen_layout_refresh_signal.subscribe(
             self, self._maybe_clear_tooltip, immediate=True
         )
-        self.refresh_bindings()
-        # Send this signal so we don't get an initial frame with no bindings in the footer
-        self.bindings_updated_signal.publish(self)
 
     async def _on_idle(self, event: events.Idle) -> None:
         # Check for any widgets marked as 'dirty' (needs a repaint)
         event.prevent_default()
+        if not self.app._batch_count and self.is_current:
+            if (
+                self._layout_required
+                or self._scroll_required
+                or self._repaint_required
+                or self._recompose_required
+                or self._dirty_widgets
+            ):
+                self._update_timer.resume()
+                return
 
-        try:
-            if not self.app._batch_count and self.is_current:
-                if (
-                    self._layout_required
-                    or self._scroll_required
-                    or self._repaint_required
-                    or self._recompose_required
-                    or self._dirty_widgets
-                ):
-                    self._update_timer.resume()
-                    return
-
-            await self._invoke_and_clear_callbacks()
-        finally:
-            if self._bindings_updated:
-                self._bindings_updated = False
-                if self.is_attached and not self.app._exit:
-                    self.app.call_later(self.bindings_updated_signal.publish, self)
+        await self._invoke_and_clear_callbacks()
 
     def _compositor_refresh(self) -> None:
         """Perform a compositor refresh."""
@@ -978,13 +1238,12 @@ class Screen(Generic[ScreenResultType], Widget):
         self._update_timer.pause()
         if self.is_current and not self.app._batch_count:
             if self._layout_required:
-                self._refresh_layout()
+                self._refresh_layout(scroll=self._scroll_required)
                 self._layout_required = False
-                self._scroll_required = False
                 self._dirty_widgets.clear()
             elif self._scroll_required:
                 self._refresh_layout(scroll=True)
-                self._scroll_required = False
+            self._scroll_required = False
 
             if self._repaint_required:
                 self._dirty_widgets.clear()
@@ -1066,7 +1325,7 @@ class Screen(Generic[ScreenResultType], Widget):
         ResizeEvent = events.Resize
 
         try:
-            if scroll:
+            if scroll and not self._layout_widgets:
                 exposed_widgets = self._compositor.reflow_visible(self, size)
                 if exposed_widgets:
                     layers = self._compositor.layers
@@ -1091,6 +1350,7 @@ class Screen(Generic[ScreenResultType], Widget):
 
             else:
                 hidden, shown, resized = self._compositor.reflow(self, size)
+                self._layout_widgets.clear()
                 Hide = events.Hide
                 Show = events.Show
 
@@ -1122,8 +1382,12 @@ class Screen(Generic[ScreenResultType], Widget):
         except Exception as error:
             self.app._handle_exception(error)
             return
+
         if self.is_current:
-            self._compositor_refresh()
+            if self.app._batch_count:
+                self.call_later(self._compositor_refresh)
+            else:
+                self._compositor_refresh()
 
         if self.app._dom_ready:
             self.screen_layout_refresh_signal.publish(self.screen)
@@ -1144,8 +1408,24 @@ class Screen(Generic[ScreenResultType], Widget):
     async def _on_layout(self, message: messages.Layout) -> None:
         message.stop()
         message.prevent_default()
-        self._layout_required = True
-        self.check_idle()
+
+        layout_required = False
+        widget: DOMNode = message.widget
+        for ancestor in message.widget.ancestors:
+            if not isinstance(ancestor, Widget):
+                break
+            if ancestor not in self._layout_widgets:
+                self._layout_widgets[ancestor] = set()
+            if widget not in self._layout_widgets:
+                self._layout_widgets[ancestor].add(widget)
+                layout_required = True
+            if not ancestor.styles.auto_dimensions:
+                break
+            widget = ancestor
+
+        if layout_required and not self._layout_required:
+            self._layout_required = True
+            self.check_idle()
 
     async def _on_update_scroll(self, message: messages.UpdateScroll) -> None:
         message.stop()
@@ -1177,21 +1457,37 @@ class Screen(Generic[ScreenResultType], Widget):
         inline_height = min(self.app.size.height, inline_height)
         return inline_height
 
-    def _screen_resized(self, size: Size):
+    def _screen_resized(self, size: Size) -> None:
         """Called by App when the screen is resized."""
-        self._refresh_layout(size)
-        self.refresh()
+        if self.stack_updates and self.is_attached:
+            self._refresh_layout(size)
 
-    def _on_screen_resume(self) -> None:
+    def _on_screen_resume(self, event: events.ScreenResume) -> None:
         """Screen has resumed."""
-        self.remove_class("-screen-suspended")
+        if self.app.SUSPENDED_SCREEN_CLASS:
+            self.remove_class(self.app.SUSPENDED_SCREEN_CLASS)
+
         self.stack_updates += 1
+
         self.app._refresh_notifications()
         size = self.app.size
 
-        self._refresh_layout(size)
-        self.refresh()
-        # Only auto-focus when the app has focus (textual-web only)
+        self._update_auto_focus()
+
+        if self.is_attached:
+
+            if event.refresh_styles:
+                self.update_node_styles(animate=False)
+            if self._size != size:
+                self._refresh_layout(size)
+            self.refresh()
+
+    async def _compose(self) -> None:
+        await super()._compose()
+        self._update_auto_focus()
+
+    def _update_auto_focus(self) -> None:
+        """Update auto focus."""
         if self.app.app_focus:
             auto_focus = (
                 self.app.AUTO_FOCUS if self.AUTO_FOCUS is None else self.AUTO_FOCUS
@@ -1199,13 +1495,15 @@ class Screen(Generic[ScreenResultType], Widget):
             if auto_focus and self.focused is None:
                 for widget in self.query(auto_focus):
                     if widget.focusable:
+                        widget.has_focus = True
                         self.set_focus(widget)
                         break
 
     def _on_screen_suspend(self) -> None:
         """Screen has suspended."""
-        self.add_class("-screen-suspended")
-        self.app._set_mouse_over(None)
+        if self.app.SUSPENDED_SCREEN_CLASS:
+            self.add_class(self.app.SUSPENDED_SCREEN_CLASS)
+        self.app._set_mouse_over(None, None)
         self._clear_tooltip()
         self.stack_updates += 1
 
@@ -1214,6 +1512,54 @@ class Screen(Generic[ScreenResultType], Widget):
         self._screen_resized(event.size)
         for screen in self.app._background_screens:
             screen._screen_resized(event.size)
+
+        horizontal_breakpoints = (
+            self.app.HORIZONTAL_BREAKPOINTS
+            if self.HORIZONTAL_BREAKPOINTS is None
+            else self.HORIZONTAL_BREAKPOINTS
+        ) or []
+
+        vertical_breakpoints = (
+            self.app.VERTICAL_BREAKPOINTS
+            if self.VERTICAL_BREAKPOINTS is None
+            else self.VERTICAL_BREAKPOINTS
+        ) or []
+
+        if horizontal_breakpoints or vertical_breakpoints:
+            width, height = event.size
+            breakpoints = {
+                breakpoint: False
+                for _, breakpoint in (horizontal_breakpoints + vertical_breakpoints)
+            }
+
+            for breakpoint in self._get_breakpoint_classes(
+                width, horizontal_breakpoints
+            ):
+                breakpoints[breakpoint] = True
+
+            for breakpoint in self._get_breakpoint_classes(
+                height, vertical_breakpoints
+            ):
+                breakpoints[breakpoint] = True
+
+            self.update_classes(breakpoints, animate=False)
+
+    def _get_breakpoint_classes(
+        self, dimension: int, breakpoints: list[tuple[int, str]]
+    ) -> set[str]:
+        """Get breakpoint classes for given dimension.
+
+        Args:
+            dimension: Size in cells.
+            breakpoints: Associated breakpoints.
+
+        Returns:
+            A set containing a breakpoint, or an empty set if none apply.
+        """
+        for breakpoint, class_name in sorted(breakpoints, reverse=True):
+            if dimension >= breakpoint:
+                return {class_name}
+        return set()
 
     def _update_tooltip(self, widget: Widget) -> None:
         """Update the content of the tooltip."""
@@ -1278,18 +1624,21 @@ class Screen(Generic[ScreenResultType], Widget):
                 tooltip.display = False
             else:
                 tooltip.display = True
-                tooltip._absolute_offset = self.app.mouse_position
+                tooltip.absolute_offset = self.app.mouse_position
                 tooltip.update(tooltip_content)
 
     def _handle_mouse_move(self, event: events.MouseMove) -> None:
+        hover_widget: Widget | None = None
         try:
             if self.app.mouse_captured:
                 widget = self.app.mouse_captured
                 region = self.find_widget(widget).region
             else:
-                widget, region = self.get_widget_at(event.x, event.y)
+                (widget, region), hover = self.get_hover_widgets_at(event.x, event.y)
+                if hover is not None:
+                    hover_widget = hover[0]
         except errors.NoWidget:
-            self.app._set_mouse_over(None)
+            self.app._set_mouse_over(None, None)
             if self._tooltip_timer is not None:
                 self._tooltip_timer.stop()
             if not self.app._disable_tooltips:
@@ -1297,14 +1646,14 @@ class Screen(Generic[ScreenResultType], Widget):
                     self.get_child_by_type(Tooltip).display = False
                 except NoMatches:
                     pass
-
         else:
-            self.app._set_mouse_over(widget)
+            self.app._set_mouse_over(widget, hover_widget)
+            self.update_pointer_shape()
             widget.hover_style = event.style
             if widget is self:
                 self.post_message(event)
             else:
-                mouse_event = self._translate_mouse_move_event(event, region)
+                mouse_event = self._translate_mouse_move_event(event, widget, region)
                 mouse_event._set_forwarded()
                 widget._forward_event(mouse_event)
 
@@ -1326,28 +1675,147 @@ class Screen(Generic[ScreenResultType], Widget):
                         )
                     else:
                         tooltip.display = False
+        self.screen.update_pointer_shape()
 
     @staticmethod
     def _translate_mouse_move_event(
-        event: events.MouseMove, region: Region
+        event: events.MouseMove, widget: Widget, region: Region
     ) -> events.MouseMove:
         """
         Returns a mouse move event whose relative coordinates are translated to
         the origin of the specified region.
         """
         return events.MouseMove(
-            event.x - region.x,
-            event.y - region.y,
-            event.delta_x,
-            event.delta_y,
+            widget,
+            event._x - region.x,
+            event._y - region.y,
+            event._delta_x,
+            event._delta_y,
             event.button,
             event.shift,
             event.meta,
             event.ctrl,
-            screen_x=event.screen_x,
-            screen_y=event.screen_y,
+            screen_x=event._screen_x,
+            screen_y=event._screen_y,
             style=event.style,
         )
+
+    def _start_auto_scroll(
+        self,
+        widget: Widget,
+        direction: Literal[+1, -1],
+        speed: float = 1.0,
+    ) -> None:
+        """Start (or update) auto scrolling.
+
+        Args:
+            widget: Container widget to scroll.
+            direction: Direction: `+1` for up, `-1` for down.
+            speed: The scroll speed as a factor of the maximum.
+        """
+        assert speed > 0, "Speed should be positive and non-zero"
+
+        def _auto_scroll_y(widget: Widget, direction: float) -> None:
+            """Scroll a container a single line in the given direction.
+
+            Args:
+                widget: Container widgets to scroll.
+                direction: Lines to scroll.
+            """
+            if self._select_state is not None:
+                # Update scroll position
+                widget.scroll_y += direction
+                widget.scroll_target_y = widget.scroll_y
+                # Update selection highlights which may have changed due to the scroll
+                self._update_select()
+
+        # Replace current timer
+        self._stop_auto_scroll()
+
+        # Lines to scroll per frame (may be fractional)
+        lines_to_scroll = (
+            direction * (self.app.SELECT_AUTO_SCROLL_SPEED / constants.MAX_FPS) * speed
+        )
+        # Callable to perform scroll
+        scroll_callback = partial(_auto_scroll_y, widget, lines_to_scroll)
+        # Perform initial scroll
+        scroll_callback()
+        # Start a timer to perform future scrolling
+        # This is so the user doesn't have to move the mouse to keep scrolling
+        self._auto_select_scroll_timer = self.set_interval(
+            1 / constants.MAX_FPS, scroll_callback
+        )
+
+    def _stop_auto_scroll(self) -> None:
+        """Stop any auto scrolling."""
+        if self._auto_select_scroll_timer is not None:
+            self._auto_select_scroll_timer.stop()
+            self._auto_select_scroll_timer = None
+
+    def _check_auto_scroll(
+        self,
+        select_widget: Widget,
+        mouse_coordinate: tuple[float, float],
+        delta_y: float,
+    ) -> None:
+        """Check auto-scrolling when selecting.
+
+        This will start, update, or stop a timer used to move the scroll position.
+
+        Args:
+            select_widget: The widget under the mouise pointer.
+            mouse_coordinate: The screen-space mouse pointer.
+            delta_y: Change in mouse y since previous mouse move.
+        """
+
+        if not self.app.ENABLE_SELECT_AUTO_SCROLL:
+            # Disabled by app
+            return
+
+        if self._auto_select_scroll_timer is None and abs(delta_y) < 1:
+            # Mouse has moved horizontally, not vertically, so we assume the user doesn't want to scroll
+            return
+
+        mouse_x, mouse_y = mouse_coordinate
+        mouse_offset = Offset(int(mouse_x), int(mouse_y))
+
+        # We want to find any scrollable regions further up the DOM,
+        # and apply auto scrolling if we are in a region at the top or bottom
+        for ancestor in select_widget.ancestors_with_self:
+            if not isinstance(ancestor, Widget):
+                break
+            if not ancestor.allow_vertical_scroll:
+                # Can't scroll, so check the next ancestor
+                continue
+            ancestor_region = ancestor.content_region
+            scroll_lines = self.app.SELECT_AUTO_SCROLL_LINES
+            up_region, down_region = get_auto_scroll_regions(
+                ancestor_region,
+                auto_scroll_lines=scroll_lines,
+            )
+            if mouse_offset in up_region:
+                # Mouse is in the up region
+                if ancestor.scroll_y > 0:
+                    # And there is room to scroll
+                    # Speed increases the closer we are to the edge
+                    speed = (scroll_lines - (mouse_y - up_region.y)) / scroll_lines
+                    if speed:
+                        self._start_auto_scroll(ancestor, -1, speed)
+                        return
+            elif mouse_offset in down_region:
+                # Mouse is in the down region
+                if ancestor.scroll_y < ancestor.max_scroll_y:
+                    # And there is room to scroll
+                    speed = (mouse_y - down_region.y) / scroll_lines
+                    if speed:
+                        self._start_auto_scroll(ancestor, +1, speed)
+                        return
+        # Nothing to auto scroll, so stop the timer
+        self._stop_auto_scroll()
+
+    def _update_select(self) -> None:
+        """Update select for a screen-space offset (typically the mouse position)."""
+        self._watch__select_state(self._select_state)
 
     def _forward_event(self, event: events.Event) -> None:
         if event.is_forwarded:
@@ -1361,7 +1829,98 @@ class Screen(Generic[ScreenResultType], Widget):
             event.style = self.get_style_at(event.screen_x, event.screen_y)
             self._handle_mouse_move(event)
 
+            if self._selecting and self._select_state is not None:
+
+                select_widget, select_offset = self.get_widget_and_offset_at(
+                    event.x, event.y
+                )
+                if select_widget is not None:
+                    if select_offset is not None:
+                        content_widget = select_widget
+                        content_offset = select_offset
+                        container = (
+                            content_widget
+                            if isinstance(content_widget, Screen)
+                            else content_widget.parent
+                        )
+                    else:
+                        content_widget = None
+                        container = select_widget
+                        content_offset = None
+
+                    self._select_state = self._select_state.update_end(
+                        event.screen_offset,
+                        SelectEnd(container, content_widget, content_offset),
+                    )
+
+                if select_widget is not None:
+                    self._check_auto_scroll(
+                        select_widget,
+                        (event.pointer_screen_x, event.pointer_screen_y),
+                        event.delta_y,
+                    )
+                else:
+                    self._stop_auto_scroll()
+
         elif isinstance(event, events.MouseEvent):
+            if isinstance(event, events.MouseUp):
+                if (
+                    self._mouse_down_offset is not None
+                    and self._mouse_down_offset == event.screen_offset
+                ):
+                    # A click elsewhere should clear the selection
+                    select_widget, select_offset = self.get_widget_and_offset_at(
+                        event.x, event.y
+                    )
+                    # Exclude scrollbars, so the user may navigate without clearing the selection
+                    if select_widget is None or not select_widget.has_class(
+                        "-textual-system"
+                    ):
+                        self.clear_selection()
+
+                self._mouse_down_offset = None
+                self._selecting = False
+                self.post_message(events.TextSelected())
+
+            elif isinstance(event, events.MouseDown) and not self.app.mouse_captured:
+                self._mouse_down_offset = event.screen_offset
+                select_widget, select_offset = self.get_widget_and_offset_at(
+                    event.x, event.y
+                )
+
+                if (
+                    select_widget is not None
+                    and select_widget.allow_select
+                    and self.screen.allow_select
+                    and self.app.ALLOW_SELECT
+                ):
+                    if select_offset is not None:
+                        content_widget = select_widget
+                        content_offset = select_offset
+                        container = (
+                            content_widget
+                            if isinstance(content_widget, Screen)
+                            else content_widget.parent
+                        )
+                    else:
+                        content_widget = None
+                        container = select_widget
+                        content_offset = None
+
+                    self._select_state = SelectState(
+                        event.screen_offset,
+                        start=SelectStart(
+                            container,
+                            event.screen_offset - container.region.offset,
+                            container.region.offset,
+                            container.scroll_offset,
+                            content_widget=content_widget,
+                            content_offset=content_offset,
+                        ),
+                    )
+                else:
+                    self._select_state = None
+
             try:
                 if self.app.mouse_captured:
                     widget = self.app.mouse_captured
@@ -1373,9 +1932,14 @@ class Screen(Generic[ScreenResultType], Widget):
             else:
                 if isinstance(event, events.MouseDown):
                     focusable_widget = self.get_focusable_widget_at(event.x, event.y)
-                    if focusable_widget:
+                    if (
+                        focusable_widget is not None
+                        and focusable_widget.focus_on_click()
+                    ):
                         self.set_focus(focusable_widget, scroll_visible=False)
                 event.style = self.get_style_at(event.screen_x, event.screen_y)
+                if widget.loading:
+                    return
                 if widget is self:
                     event._set_forwarded()
                     self.post_message(event)
@@ -1384,14 +1948,107 @@ class Screen(Generic[ScreenResultType], Widget):
 
         else:
             self.post_message(event)
+        self.update_pointer_shape()
+
+    def _key_escape(self) -> None:
+        self.clear_selection()
+
+    def _watch__selecting(self, selecting: bool) -> None:
+        if not selecting:
+            self._stop_auto_scroll()
+
+    @classmethod
+    def _collect_select_widgets(
+        cls,
+        selection_bounds: Shape,
+        container: Widget,
+        start_widget: Widget,
+        end_widget: Widget,
+    ) -> list[Widget]:
+        """Get widgets between two widgets in select order.
+
+        Args:
+            selection_bounds: A shape defining the selection bounds.
+            container: A parent widgets.
+            start_widget: First widget.
+            end_widget: Second widget.
+
+        Returns:
+            Widgets between start and end, in select sort order.
+        """
+
+        widgets = list(
+            walk_selectable_widgets(
+                container,
+                selection_bounds,
+                {start_widget, end_widget},
+            )
+        )
+
+        index1: int | None = None
+        try:
+            index1 = widgets.index(start_widget)
+        except ValueError:
+            pass
+
+        index2: int | None = None
+        try:
+            index2 = widgets.index(end_widget) + 1
+        except ValueError:
+            pass
+
+        results = widgets[index1:index2]
+        return results
+
+    def _watch__select_state(self, select_state: SelectState | None) -> None:
+        """Respond to user-initiated selection change.
+
+        Args:
+            select_state: Current selection state.
+        """
+        if select_state is None:
+            # Nothing selected so nothing todo
+            self._selecting = False
+            self.refresh()
+            return
+        else:
+            self._selecting = True
+
+        if select_state.end is None:
+            # Pointer hasn't yet moved
+            return
+
+        if not select_state.is_attached_to_dom:
+            # Widgets may have been removed in the interim
+            self._select_state = None
+            return
+
+        # Simple case where select starts and ends on the same widgets
+        if select_state.is_single_content_widget:
+            start_index, end_offset = select_state.content_offsets
+            assert select_state.start.content_widget is not None
+            self.selections = {
+                select_state.start.content_widget: Selection.from_offsets(
+                    start_index,
+                    end_offset + (1, 0),
+                )
+            }
+            return
+
+        # Select all the widgets
+        select_all = SELECT_ALL
+        selections = {
+            widget: select_all for widget in select_state._walk_selected_widgets()
+        }
+        select_state._apply_content_selections(selections)
+
+        # Update selections
+        self.selections = selections
 
     def dismiss(self, result: ScreenResultType | None = None) -> AwaitComplete:
         """Dismiss the screen, optionally with a result.
 
         Any callback provided in [push_screen][textual.app.App.push_screen] will be invoked with the supplied result.
-
-        Only the active screen may be dismissed. This method will produce a warning in the logs if
-        called on an inactive screen (but otherwise have no effect).
 
         !!! warning
 
@@ -1404,9 +2061,6 @@ class Screen(Generic[ScreenResultType], Widget):
 
         """
         _rich_traceback_omit = True
-        if not self.is_active:
-            self.log.warning("Can't dismiss inactive screen")
-            return AwaitComplete()
         if self._result_callbacks:
             callback = self._result_callbacks[-1]
             callback(result)
@@ -1452,24 +2106,44 @@ class Screen(Generic[ScreenResultType], Widget):
         await self._flush_next_callbacks()
         self.dismiss(result)
 
-    def can_view(self, widget: Widget) -> bool:
-        """Check if a given widget is in the current view (scrollable area).
+    def can_view_entire(self, widget: Widget) -> bool:
+        """Check if a given widget is fully within the current screen.
 
         Note: This doesn't necessarily equate to a widget being visible.
         There are other reasons why a widget may not be visible.
 
         Args:
-            widget: A widget that is a descendant of self.
+            widget: A widget.
 
         Returns:
-            True if the entire widget is in view, False if it is partially visible or not in view.
+            `True` if the entire widget is in view, `False` if it is partially visible or not in view.
         """
+        if widget not in self._compositor.visible_widgets:
+            return False
         # If the widget is one that overlays the screen...
         if widget.styles.overlay == "screen":
             # ...simply check if it's within the screen's region.
             return widget.region in self.region
         # Failing that fall back to normal checking.
-        return super().can_view(widget)
+        return super().can_view_entire(widget)
+
+    def can_view_partial(self, widget: Widget) -> bool:
+        """Check if a given widget is at least partially within the current view.
+
+        Args:
+            widget: A widget.
+
+        Returns:
+            `True` if the any part of the widget is in view, `False` if it is completely outside of the screen.
+        """
+        if widget not in self._compositor.visible_widgets:
+            return False
+        # If the widget is one that overlays the screen...
+        if widget.styles.overlay == "screen":
+            # ...simply check if it's within the screen's region.
+            return widget.region in self.region
+        # Failing that fall back to normal checking.
+        return super().can_view_partial(widget)
 
     def validate_title(self, title: Any) -> str | None:
         """Ensure the title is a string or `None`."""

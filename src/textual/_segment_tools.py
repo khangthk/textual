@@ -5,6 +5,7 @@ Tools for processing Segments, or lists of Segments.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Iterable
 
 from rich.segment import Segment
@@ -13,6 +14,20 @@ from rich.style import Style
 from textual._cells import cell_len
 from textual.css.types import AlignHorizontal, AlignVertical
 from textual.geometry import Size
+
+
+@lru_cache(1024 * 8)
+def make_blank(width, style: Style) -> Segment:
+    """Make a blank segment.
+
+    Args:
+        width: Width of blank.
+        style: Style of blank.
+
+    Returns:
+        A single segment
+    """
+    return Segment(" " * width, style)
 
 
 class NoCellPositionForIndex(Exception):
@@ -162,19 +177,19 @@ def line_pad(
     """
     if pad_left and pad_right:
         return [
-            Segment(" " * pad_left, style),
+            make_blank(pad_left, style),
             *segments,
-            Segment(" " * pad_right, style),
+            make_blank(pad_right, style),
         ]
     elif pad_left:
         return [
-            Segment(" " * pad_left, style),
+            make_blank(pad_left, style),
             *segments,
         ]
     elif pad_right:
         return [
             *segments,
-            Segment(" " * pad_right, style),
+            make_blank(pad_right, style),
         ]
     return list(segments)
 
@@ -215,7 +230,7 @@ def align_lines(
         Returns:
             A list of blank lines.
         """
-        return [[Segment(" " * width, style)]] * count
+        return [[make_blank(width, style)]] * count
 
     top_blank_lines = bottom_blank_lines = 0
     vertical_excess_space = max(0, height - shape_height)
@@ -231,8 +246,6 @@ def align_lines(
     if top_blank_lines:
         yield from blank_lines(top_blank_lines)
 
-    horizontal_excess_space = max(0, width - shape_width)
-
     if horizontal == "left":
         for cell_length, line in zip(line_lengths, lines):
             if cell_length == width:
@@ -241,7 +254,7 @@ def align_lines(
                 yield line_pad(line, 0, width - cell_length, style)
 
     elif horizontal == "center":
-        left_space = horizontal_excess_space // 2
+        left_space = max(0, width - shape_width) // 2
         for cell_length, line in zip(line_lengths, lines):
             if cell_length == width:
                 yield line

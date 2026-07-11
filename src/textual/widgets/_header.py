@@ -6,11 +6,13 @@ from datetime import datetime
 
 from rich.text import Text
 
-from textual.app import RenderResult
+from textual.app import ComposeResult, RenderResult
+from textual.content import Content
 from textual.dom import NoScreen
 from textual.events import Click, Mount
 from textual.reactive import Reactive
 from textual.widget import Widget
+from textual.widgets import Static
 
 
 class HeaderIcon(Widget):
@@ -33,7 +35,10 @@ class HeaderIcon(Widget):
     """The character to use as the icon within the header."""
 
     def on_mount(self) -> None:
-        self.tooltip = "Open the command palette"
+        if self.app.ENABLE_COMMAND_PALETTE:
+            self.tooltip = "Open the command palette"
+        else:
+            self.disabled = True
 
     async def on_click(self, event: Click) -> None:
         """Launch the command palette when icon is clicked."""
@@ -75,7 +80,7 @@ class HeaderClock(HeaderClockSpace):
     DEFAULT_CSS = """
     HeaderClock {
         background: $foreground-darken-1 5%;
-        color: $text;
+        color: $foreground;
         text-opacity: 85%;
         content-align: center middle;
     }
@@ -95,33 +100,17 @@ class HeaderClock(HeaderClockSpace):
         return Text(datetime.now().time().strftime(self.time_format))
 
 
-class HeaderTitle(Widget):
+class HeaderTitle(Static):
     """Display the title / subtitle in the header."""
 
     DEFAULT_CSS = """
     HeaderTitle {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
         content-align: center middle;
         width: 100%;
     }
     """
-
-    text: Reactive[str] = Reactive("")
-    """The main title text."""
-
-    sub_text = Reactive("")
-    """The sub-title text."""
-
-    def render(self) -> RenderResult:
-        """Render the title and sub-title.
-
-        Returns:
-            The value to render.
-        """
-        text = Text(self.text, no_wrap=True, overflow="ellipsis")
-        if self.sub_text:
-            text.append(" — ")
-            text.append(self.sub_text, "dim")
-        return text
 
 
 class Header(Widget):
@@ -131,8 +120,8 @@ class Header(Widget):
     Header {
         dock: top;
         width: 100%;
-        background: $foreground 5%;
-        color: $text;
+        background: $panel;
+        color: $foreground;
         height: 1;
     }
     Header.-tall {
@@ -178,7 +167,7 @@ class Header(Widget):
         if time_format is not None:
             self.time_format = time_format
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         yield HeaderIcon().data_bind(Header.icon)
         yield HeaderTitle()
         yield (
@@ -192,6 +181,17 @@ class Header(Widget):
 
     def _on_click(self):
         self.toggle_class("-tall")
+
+    def format_title(self) -> Content:
+        """Format the title and subtitle.
+
+        Defers to [App.format_title][textual.app.App.format_title] by default.
+        Override this method if you want to customize how the title is displayed in the header.
+
+        Returns:
+            Content for title display.
+        """
+        return self.app.format_title(self.screen_title, self.screen_sub_title)
 
     @property
     def screen_title(self) -> str:
@@ -218,17 +218,11 @@ class Header(Widget):
     def _on_mount(self, _: Mount) -> None:
         async def set_title() -> None:
             try:
-                self.query_one(HeaderTitle).text = self.screen_title
-            except NoScreen:
-                pass
-
-        async def set_sub_title() -> None:
-            try:
-                self.query_one(HeaderTitle).sub_text = self.screen_sub_title
+                self.query_one(HeaderTitle).update(self.format_title())
             except NoScreen:
                 pass
 
         self.watch(self.app, "title", set_title)
-        self.watch(self.app, "sub_title", set_sub_title)
+        self.watch(self.app, "sub_title", set_title)
         self.watch(self.screen, "title", set_title)
-        self.watch(self.screen, "sub_title", set_sub_title)
+        self.watch(self.screen, "sub_title", set_title)

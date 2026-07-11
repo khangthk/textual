@@ -102,8 +102,8 @@ class TokenError(Exception):
         return Group(*errors)
 
 
-class EOFError(TokenError):
-    """Indicates that the CSS ended prematurely."""
+class UnexpectedEnd(TokenError):
+    """Indicates that the text being tokenized ended prematurely."""
 
 
 @rich.repr.auto
@@ -127,9 +127,21 @@ class Expect:
         self.match = self._regex.match
         self.search = self._regex.search
         self._expect_eof = False
+        self._expect_semicolon = True
+        self._extract_text = False
 
-    def expect_eof(self, eof: bool) -> Expect:
+    def expect_eof(self, eof: bool = True) -> Expect:
+        """Expect an end of file."""
         self._expect_eof = eof
+        return self
+
+    def expect_semicolon(self, semicolon: bool = True) -> Expect:
+        """Tokenizer expects text to be terminated with a semi-colon."""
+        self._expect_semicolon = semicolon
+        return self
+
+    def extract_text(self, extract: bool = True) -> Expect:
+        self._extract_text = extract
         return self
 
     def __rich_repr__(self) -> rich.repr.Result:
@@ -219,7 +231,7 @@ class Tokenizer:
             expect: Expect object which describes which tokens may be read.
 
         Raises:
-            EOFError: If there is an unexpected end of file.
+            UnexpectedEnd: If there is an unexpected end of file.
             TokenError: If there is an error with the token.
 
         Returns:
@@ -239,29 +251,55 @@ class Tokenizer:
                     None,
                 )
             else:
-                raise EOFError(
+                raise UnexpectedEnd(
                     self.read_from,
                     self.code,
                     (line_no + 1, col_no + 1),
-                    "Unexpected end of file; did you forget a '}' ?",
+                    (
+                        "Unexpected end of file; did you forget a '}' ?"
+                        if expect._expect_semicolon
+                        else "Unexpected end of text"
+                    ),
                 )
         line = self.lines[line_no]
-        match = expect.match(line, col_no)
+        preceding_text: str = ""
+        if expect._extract_text:
+            match = expect.search(line, col_no)
+            if match is None:
+                preceding_text = line[self.col_no :]
+                self.line_no += 1
+                self.col_no = 0
+            else:
+                col_no = match.start()
+                preceding_text = line[self.col_no : col_no]
+                self.col_no = col_no
+            if preceding_text:
+                token = Token(
+                    "text",
+                    preceding_text,
+                    self.read_from,
+                    self.code,
+                    (line_no, col_no),
+                    referenced_by=None,
+                )
+
+                return token
+
+        else:
+            match = expect.match(line, col_no)
+
         if match is None:
-            error_line = line[col_no:].rstrip()
+            error_line = line[col_no:]
             error_message = (
                 f"{expect.description} (found {error_line.split(';')[0]!r})."
             )
-            if not error_line.endswith(";"):
+            if expect._expect_semicolon and not error_line.endswith(";"):
                 error_message += "; Did you forget a semicolon at the end of a line?"
             raise TokenError(
                 self.read_from, self.code, (line_no + 1, col_no + 1), error_message
             )
-        iter_groups = iter(match.groups())
 
-        next(iter_groups)
-
-        for name, value in zip(expect.names, iter_groups):
+        for name, value in zip(expect.names, match.groups()[1:]):
             if value is not None:
                 break
         else:
@@ -314,7 +352,7 @@ class Tokenizer:
             expect: Expect object describing the expected token.
 
         Raises:
-            EOFError: If end of file is reached.
+            UnexpectedEndOfText: If end of file is reached.
 
         Returns:
             A new token.
@@ -324,11 +362,15 @@ class Tokenizer:
 
         while True:
             if line_no >= len(self.lines):
-                raise EOFError(
+                raise UnexpectedEnd(
                     self.read_from,
                     self.code,
                     (line_no, col_no),
-                    "Unexpected end of file; did you forget a '}' ?",
+                    (
+                        "Unexpected end of file; did you forget a '}' ?"
+                        if expect._expect_semicolon
+                        else "Unexpected end of markup"
+                    ),
                 )
             line = self.lines[line_no]
             match = expect.search(line, col_no)

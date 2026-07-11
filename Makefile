@@ -4,6 +4,10 @@ run := poetry run
 test:
 	$(run) pytest tests/ -n 16 --dist=loadgroup $(ARGS)
 
+.PHONY: testv
+testv:
+	$(run) pytest tests/ -vvv -n 16 --dist=loadgroup $(ARGS)
+
 .PHONY: test-snapshot-update
 test-snapshot-update:
 	$(run) pytest tests/ --snapshot-update -n 16 --dist=loadgroup $(ARGS)
@@ -48,7 +52,7 @@ docs-online-nav:
 
 .PHONY: docs-serve
 docs-serve: clean-screenshot-cache docs-online-nav
-	$(run) mkdocs serve --config-file mkdocs-nav-online.yml
+	TEXTUAL_THEME=dracula $(run) mkdocs serve --config-file mkdocs-nav-online.yml
 	rm -f mkdocs-nav-online.yml
 
 .PHONY: docs-serve-offline
@@ -72,7 +76,7 @@ clean-offline-docs:
 
 .PHONY: docs-deploy
 docs-deploy: clean-screenshot-cache docs-online-nav
-	$(run) mkdocs gh-deploy --config-file mkdocs-nav-online.yml
+	TEXTUAL_THEME=dracula $(run) mkdocs gh-deploy --config-file mkdocs-nav-online.yml
 	rm -f mkdocs-nav-online.yml
 
 .PHONY: build
